@@ -31,6 +31,7 @@ from free_claude_code.assignments.models import (
     AssignmentConfig,
     TaskManifest,
 )
+from free_claude_code.assignments.redact import redact
 from free_claude_code.assignments.secrets import SecretFile, load_secret_file
 from free_claude_code.assignments.service import AssignmentService
 from free_claude_code.assignments.store import StateStore
@@ -113,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
         secrets = load_secret_file(operator.secrets_file)
         _dispatch(service, operator, secrets, args)
     except AssignmentError as exc:
-        print(json.dumps({"ok": False, "error": exc.code, "detail": str(exc)}))
+        print(json.dumps({"ok": False, "error": exc.code, "detail": redact(str(exc))}))
         return 2
     return 0
 

@@ -224,15 +224,58 @@ def test_allowlist_is_not_a_sandbox() -> None:
 
 
 def test_secret_file_permissions(tmp_path: Path) -> None:
-    path = tmp_path / "secrets"
+    from free_claude_code.assignments.secrets import posix_mode_is_private
+    from free_claude_code.assignments.windows_acl import acl_is_current_user_only
+
+    assert posix_mode_is_private(0o600, directory=False)
+    assert not posix_mode_is_private(0o666, directory=False)
+    assert acl_is_current_user_only(
+        dacl_present=True,
+        dacl_protected=True,
+        allow_sids=("S-1-5-21-1",),
+        other_ace_count=0,
+        user_sid="S-1-5-21-1",
+    )
+    assert not acl_is_current_user_only(
+        dacl_present=True,
+        dacl_protected=False,
+        allow_sids=("S-1-5-21-1",),
+        other_ace_count=0,
+        user_sid="S-1-5-21-1",
+    )
+    assert not acl_is_current_user_only(
+        dacl_present=True,
+        dacl_protected=True,
+        allow_sids=("S-1-5-21-1", "S-1-1-0"),
+        other_ace_count=0,
+        user_sid="S-1-5-21-1",
+    )
+    path = tmp_path / "vault" / "secrets"
     write_secret_file(path, {"github_read": READ, "grant_key": GRANT_KEY})
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
     loaded = load_secret_file(path)
     assert loaded.get("github_read") == READ
     assert "redacted" in repr(loaded)
-    path.chmod(0o644)
+    if os.name == "nt":
+        from free_claude_code.assignments.windows_acl import file_is_current_user_only
+
+        assert file_is_current_user_only(path)
+        assert file_is_current_user_only(path.parent)
+    else:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert path.stat().st_uid == os.getuid()
+    loose_dir = tmp_path / "loose"
+    loose_dir.mkdir()
+    loose = loose_dir / "secrets"
+    loose.write_text("github_read=dummy\n", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(loose_dir, 0o755)
+        os.chmod(loose, 0o644)
     with pytest.raises(Forbidden):
-        load_secret_file(path)
+        load_secret_file(loose)
+    link = path.parent / "link"
+    link.symlink_to(path)
+    with pytest.raises(Forbidden):
+        load_secret_file(link)
 
 
 def test_grant_rejects_stale_and_revoked() -> None:
