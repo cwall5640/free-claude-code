@@ -21,12 +21,41 @@ from free_claude_code.assignments.github_http import GitHubHttpClient
 from free_claude_code.assignments.secrets import (
     load_secret_file,
     posix_mode_is_private,
+    refuse_symlink_or_reparse,
     write_secret_file,
 )
 from free_claude_code.assignments.windows_acl import acl_is_current_user_only
 
 DUMMY_READ = "dummy-read-not-a-real-token"
 DUMMY_PUBLISH = "dummy-publish-not-a-real-token"
+
+
+def attempt_symlink_rejection(link: Path, target: Path) -> str:
+    """Return VALIDATED, UNVERIFIED, or FAILED_LINK_WAS_READ.
+
+    UNVERIFIED means this OS refused to create a symlink. That does not
+    prove the loader rejects one.
+    """
+
+    try:
+        refuse_symlink_or_reparse(is_symlink=True, reparse=False)
+    except Forbidden:
+        pass
+    else:
+        return "FAILED_POLICY"
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        winerror = getattr(exc, "winerror", None)
+        return (
+            "UNVERIFIED "
+            f"{type(exc).__name__} winerror={winerror} errno={exc.errno}"
+        )
+    try:
+        load_secret_file(link)
+    except Forbidden:
+        return "VALIDATED"
+    return "FAILED_LINK_WAS_READ"
 
 
 class SecretAndHttpTests(unittest.TestCase):
@@ -75,9 +104,12 @@ class SecretAndHttpTests(unittest.TestCase):
             with self.assertRaises(Forbidden):
                 load_secret_file(insecure)
             link = path.parent / "link"
-            link.symlink_to(path)
-            with self.assertRaises(Forbidden):
-                load_secret_file(link)
+            symlink_result = attempt_symlink_rejection(link, path)
+            print(f"symlink_rejection={symlink_result}")
+            self.assertNotEqual(symlink_result, "FAILED_LINK_WAS_READ")
+            self.assertNotEqual(symlink_result, "FAILED_POLICY")
+            if os.name != "nt":
+                self.assertEqual(symlink_result, "VALIDATED")
 
     def test_local_http_fixture_and_no_secret_in_error(self) -> None:
         seen: list[str] = []
@@ -134,5 +166,6 @@ class SecretAndHttpTests(unittest.TestCase):
 
 if __name__ == "__main__":
     print(f"python={sys.version.split()[0]} platform={sys.platform}")
+    print("windows_acl_execution=" + ("native" if os.name == "nt" else "unrun"))
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)

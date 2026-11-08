@@ -281,8 +281,12 @@ def _inspect(path: Path, *, directory: bool) -> tuple[bool, str]:
         info = _ByHandle()
         if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
             raise Forbidden("cannot stat the secret path by handle")
-        if info.dwFileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-            raise Forbidden("refusing a reparse point or symlink for secrets")
+        from free_claude_code.assignments.secrets import refuse_symlink_or_reparse
+
+        refuse_symlink_or_reparse(
+            is_symlink=False,
+            reparse=bool(info.dwFileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT),
+        )
         owner = ctypes.c_void_p()
         group = ctypes.c_void_p()
         dacl = ctypes.c_void_p()

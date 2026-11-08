@@ -219,6 +219,52 @@ def _claude(tmp: Path) -> Path:
     return path
 
 
+def _launch_fixture_claude(config: Path) -> None:
+    """Run the fixture with the interpreter. Production argv stays one executable.
+
+    Windows CreateProcess does not run a .py file as argv[0]. This helper is
+    test-only. It does not add a claude_args config field.
+    """
+
+    from free_claude_code.assignments.cli import (
+        _grant_from_file,
+        _load_manifest,
+        load_operator_file,
+    )
+    from free_claude_code.assignments.execution import NvidiaClaudeLauncher
+    from free_claude_code.assignments.grants import load_revocations
+    from free_claude_code.assignments.secrets import load_secret_file
+
+    operator = load_operator_file(config)
+    manifest = _load_manifest(operator)
+    secrets = load_secret_file(operator.secrets_file)
+    grant = _grant_from_file(operator.state_dir / "grants" / f"{manifest.manifest_id}.json")
+    script = Path(operator.claude_bin)
+    launcher = NvidiaClaudeLauncher(str(script), operator.proxy_base_url, secrets.get("proxy_auth"))
+
+    def spawn(argv: tuple[str, ...], env: dict[str, str], cwd: Path) -> None:
+        assert argv[0] == str(script)
+        assert "--dangerously-skip-permissions" not in argv
+        assert "claude_args" not in argv
+        subprocess.run(
+            [sys.executable, argv[0], *argv[1:]],
+            cwd=cwd,
+            env=env,
+            shell=False,
+            check=True,
+        )
+
+    launcher.run(
+        manifest,
+        operator.state_dir / "workspace",
+        grant,
+        grant_key=secrets.get("grant_key"),
+        now=10,
+        revocations=load_revocations(operator.state_dir / "revocations.txt"),
+        spawn=spawn,
+    )
+
+
 def test_allowlist_is_not_a_sandbox() -> None:
     assert COMMAND_ALLOWLIST_IS_A_SANDBOX is False
 
@@ -272,10 +318,14 @@ def test_secret_file_permissions(tmp_path: Path) -> None:
         os.chmod(loose, 0o644)
     with pytest.raises(Forbidden):
         load_secret_file(loose)
+    from tests.assignments.run_windows_secret_tests import attempt_symlink_rejection
+
     link = path.parent / "link"
-    link.symlink_to(path)
-    with pytest.raises(Forbidden):
-        load_secret_file(link)
+    symlink_result = attempt_symlink_rejection(link, path)
+    assert symlink_result != "FAILED_LINK_WAS_READ"
+    assert symlink_result != "FAILED_POLICY"
+    if os.name != "nt":
+        assert symlink_result == "VALIDATED"
 
 
 def test_grant_rejects_stale_and_revoked() -> None:
@@ -367,8 +417,7 @@ def test_cli_fail_fix_pass_against_local_api(tmp_path: Path, capsys: pytest.Capt
         assert first["local_tests"] == "HOLD"
         assert first["failed"] == 1
         _run(config, "grant", "--operator", "author", "--expires-at", "9999999999", capsys=capsys)
-        spawned = _run(config, "implement", "--now", "10", capsys=capsys)
-        assert spawned["nvidia_call_verified"] is False
+        _launch_fixture_claude(config)
         env_report = json.loads((tmp_path / "state" / "workspace" / "model-env.json").read_text())
         assert env_report["GITHUB_TOKEN"] is False
         assert env_report["publish"] is False

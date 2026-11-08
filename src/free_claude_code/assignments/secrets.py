@@ -26,6 +26,13 @@ from pathlib import Path
 from free_claude_code.assignments.errors import Forbidden
 from free_claude_code.assignments.redact import redact
 
+def refuse_symlink_or_reparse(*, is_symlink: bool, reparse: bool) -> None:
+    """Reject a symlink or reparse point. This does not create either one."""
+
+    if is_symlink or reparse:
+        raise Forbidden("refusing a reparse point or symlink for secrets")
+
+
 _NAMES = (
     "github_read",
     "github_ci",
@@ -89,8 +96,7 @@ def write_secret_file(path: Path, values: dict[str, str]) -> None:
     else:
         parent.mkdir(parents=True, exist_ok=False)
         _harden_new_directory(parent)
-    if path.is_symlink():
-        raise Forbidden("refusing to write secrets through a symlink")
+    refuse_symlink_or_reparse(is_symlink=path.is_symlink(), reparse=False)
     data = "".join(f"{name}={values[name]}\n" for name in _NAMES if name in values)
     _write_private(path, data.encode("utf-8"))
     _require_private_file(path)
@@ -168,8 +174,7 @@ def _require_private_directory(path: Path) -> None:
         if not file_is_current_user_only(path):
             raise Forbidden("secret directory ACL is not limited to the current user")
         return
-    if path.is_symlink():
-        raise Forbidden("refusing a symlink as the secret directory")
+    refuse_symlink_or_reparse(is_symlink=path.is_symlink(), reparse=False)
     info = path.stat()
     if not stat.S_ISDIR(info.st_mode):
         raise Forbidden("secret parent is not a directory")
@@ -186,8 +191,7 @@ def _require_private_file(path: Path) -> None:
         if not file_is_current_user_only(path):
             raise Forbidden("Windows secret ACL is not limited to the current user")
         return
-    if path.is_symlink():
-        raise Forbidden("refusing a symlink as the secret file")
+    refuse_symlink_or_reparse(is_symlink=path.is_symlink(), reparse=False)
     info = path.stat()
     if not stat.S_ISREG(info.st_mode):
         raise Forbidden("secret path is not a regular file")
