@@ -1,0 +1,21 @@
+{
+  "enabled": false,
+  "github_api_base": "http://127.0.0.1:9",
+  "secrets_file": "/home/operator/.config/fcc-assignments/secrets",
+  "state_dir": "/home/operator/.local/share/fcc-assignments",
+  "proxy_base_url": "http://127.0.0.1:8082",
+  "claude_bin": "claude",
+  "source_repo": "/home/operator/fixtures/assignment-origin",
+  "operators": ["author", "reviewer"],
+  "allowed_path_prefixes": ["src"],
+  "allowed_commands": [["/usr/bin/python3", "-m", "unittest", "test_widget"]],
+  "allowlist": [
+    {
+      "owner": "example",
+      "repo": "example",
+      "issue_number": 1,
+      "base_branch": "dev"
+    }
+  ],
+  "fetch_timeout_seconds": 10
+}

@@ -210,15 +210,9 @@ def test_checkout_retest_and_independent_review(tmp_path: Path) -> None:
     workspace = GitWorkspace(tmp_path / "work")
     head = workspace.materialize(origin, sha, f"fcc-task/{manifest.issue_number}")
     assert head == sha
-    sandbox = Sandbox(
-        workspace.path / "src",
-        allowed=((sys.executable, "-m", "unittest"),),
-    )
-    approval = NativeCommandApproval(
-        manifest.manifest_id,
-        (sys.executable, "-m", "unittest", "test_widget"),
-        "author",
-    )
+    test_argv = (sys.executable, "-m", "unittest", "test_widget")
+    sandbox = Sandbox(workspace.path / "src", allowed=(test_argv,))
+    approval = NativeCommandApproval(manifest.manifest_id, test_argv, "author")
     first = sandbox.run(approval, manifest=manifest, head_sha=head)
     assert first.local_outcome == "HOLD"
     assert first.failed == 1
@@ -229,6 +223,7 @@ def test_checkout_retest_and_independent_review(tmp_path: Path) -> None:
         manifest,
         "src/widget.py",
         "def add(left, right):\n    return left + right\n",
+        NativeCommandApproval(manifest.manifest_id, ("write-file", "src/widget.py"), "author"),
     )
     second = sandbox.run(approval, manifest=manifest, head_sha=workspace.head())
     assert second.returncode == 0
@@ -298,15 +293,13 @@ def test_credentials_do_not_reach_commands(tmp_path: Path, monkeypatch: pytest.M
 
 
 def test_timeout_cancel_and_resume(tmp_path: Path) -> None:
-    sandbox = Sandbox(
-        tmp_path,
-        allowed=((sys.executable, "-c"),),
-        timeout_seconds=0.2,
-    )
     manifest = _manifest_for_probe()
+    sleep_argv = (sys.executable, "-c", "import time; time.sleep(5)")
+    resume_argv = (sys.executable, "-c", "print('resumed')")
+    sandbox = Sandbox(tmp_path, allowed=(sleep_argv, resume_argv), timeout_seconds=0.2)
     with pytest.raises(TimedOut):
         sandbox.run(
-            NativeCommandApproval(manifest.manifest_id, (sys.executable, "-c", "import time; time.sleep(5)"), "author"),
+            NativeCommandApproval(manifest.manifest_id, sleep_argv, "author"),
             manifest=manifest,
             head_sha="abc",
         )
@@ -315,13 +308,13 @@ def test_timeout_cancel_and_resume(tmp_path: Path) -> None:
     token.cancel()
     with pytest.raises(Cancelled):
         sandbox.run(
-            NativeCommandApproval(manifest.manifest_id, (sys.executable, "-c", "print(1)"), "author"),
+            NativeCommandApproval(manifest.manifest_id, resume_argv, "author"),
             manifest=manifest,
             head_sha="abc",
             cancellation=token,
         )
     resumed = sandbox.run(
-        NativeCommandApproval(manifest.manifest_id, (sys.executable, "-c", "print('resumed')"), "author"),
+        NativeCommandApproval(manifest.manifest_id, resume_argv, "author"),
         manifest=manifest,
         head_sha="abc",
     )
@@ -357,11 +350,31 @@ def test_path_and_branch_restrictions(tmp_path: Path) -> None:
     workspace = GitWorkspace(tmp_path / "work")
     workspace.materialize(origin, sha, "fcc-task/7")
     with pytest.raises(ScopeError):
-        apply_scoped_write(workspace.path, manifest, "../outside.py", "x")
+        apply_scoped_write(
+            workspace.path,
+            manifest,
+            "../outside.py",
+            "x",
+            NativeCommandApproval(manifest.manifest_id, ("write-file", "../outside.py"), "author"),
+        )
     with pytest.raises(ScopeError):
-        apply_scoped_write(workspace.path, manifest, ".github/workflows/ci.yml", "name: x\n")
+        apply_scoped_write(
+            workspace.path,
+            manifest,
+            ".github/workflows/ci.yml",
+            "name: x\n",
+            NativeCommandApproval(
+                manifest.manifest_id, ("write-file", ".github/workflows/ci.yml"), "author"
+            ),
+        )
     with pytest.raises(MergeRejected):
-        apply_scoped_write(workspace.path, manifest, "src/widget.py", "gh pr merge 1\n")
+        apply_scoped_write(
+            workspace.path,
+            manifest,
+            "src/widget.py",
+            "gh pr merge 1\n",
+            NativeCommandApproval(manifest.manifest_id, ("write-file", "src/widget.py"), "author"),
+        )
     with pytest.raises(Forbidden):
         GitWorkspace(tmp_path / "protected").materialize(origin, sha, "main")
     with pytest.raises(Forbidden):
@@ -405,41 +418,65 @@ def test_one_writer_and_publish_failure_is_durable(tmp_path: Path) -> None:
     assert again.status(manifest.task_key)["status"] == "failed"
 
 
-def test_nvidia_launcher_refuses_without_grant(tmp_path: Path) -> None:
-    launcher = NvidiaClaudeLauncher()
+def test_nvidia_launcher_refuses_without_grant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from free_claude_code.assignments.grants import ModelGrant, sign_grant
+
+    monkeypatch.setenv("GITHUB_TOKEN", SECRET)
+    launcher = NvidiaClaudeLauncher("claude", "http://127.0.0.1:8082", "proxy-token")
     manifest = _manifest_for_probe()
-    with pytest.raises(Forbidden):
-        launcher.run(manifest, tmp_path, grant_manifest_id=None, grant_repo=None)
-    assert launcher.spawned is False
-
-    def explode(*_args: object) -> None:
-        raise AssertionError("spawn must not receive a publication token")
-
     with pytest.raises(Forbidden):
         launcher.run(
             manifest,
             tmp_path,
-            grant_manifest_id=manifest.manifest_id,
-            grant_repo=f"{manifest.owner}/{manifest.repo}",
-            spawn=None,
+            object(),
+            grant_key="k",
+            now=1,
+            revocations=set(),
         )
+    assert launcher.spawned is False
+    unsigned = ModelGrant(
+        manifest.manifest_id,
+        f"{manifest.owner}/{manifest.repo}",
+        manifest.base_sha,
+        manifest.issue_revision,
+        10,
+        ("implement",),
+        "0" * 64,
+    )
+    with pytest.raises(ApprovalInvalid):
+        launcher.run(
+            manifest,
+            tmp_path,
+            unsigned,
+            grant_key="k",
+            now=1,
+            revocations=set(),
+            spawn=lambda *_args: None,
+        )
+    grant = sign_grant("k", unsigned)
     seen: dict[str, object] = {}
 
-    def spawn(argv: tuple[str, ...], env: dict[str, str]) -> None:
+    def spawn(argv: tuple[str, ...], env: dict[str, str], cwd: Path) -> None:
         seen["argv"] = argv
         seen["env"] = env
+        seen["cwd"] = cwd
 
     launcher.run(
         manifest,
         tmp_path,
-        grant_manifest_id=manifest.manifest_id,
-        grant_repo=f"{manifest.owner}/{manifest.repo}",
+        grant,
+        grant_key="k",
+        now=1,
+        revocations=set(),
         spawn=spawn,
     )
-    assert seen["argv"] == ("claude", "--print")
-    assert "GITHUB_TOKEN" not in seen["env"]
-    assert explode
     assert launcher.spawned is True
+    argv = seen["argv"]
+    assert isinstance(argv, tuple)
+    assert "--dangerously-skip-permissions" not in argv
+    assert "GITHUB_TOKEN" not in seen["env"]
+    assert seen["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8082"
+    assert SECRET not in str(seen["env"])
 
 
 def test_default_publisher_and_base_sha_guard(tmp_path: Path) -> None:

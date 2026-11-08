@@ -154,7 +154,7 @@ class AssignmentService:
     ) -> Approval:
         self._require_enabled()
         self._check_manifest(manifest)
-        if phase not in {"execute", "publish"}:
+        if phase not in {"execute", "publish", "ci_rerun", "workflow_edit"}:
             raise Forbidden("unknown approval phase")
         if operator_id not in self.config.operators:
             raise Forbidden("operator is not on the local allowlist")
