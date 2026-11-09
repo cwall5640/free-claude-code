@@ -41,6 +41,9 @@ _SECRET_ENV = (
     "GH_ENTERPRISE_TOKEN",
     "FCC_PUBLISH_TOKEN",
     "FCC_ASKPASS_FILE",
+    "SLACK_BOT_TOKEN",
+    "SLACK_TOKEN",
+    "SLACK_API_TOKEN",
 )
 _NEVER_COMMANDS = frozenset(
     {"gh", "git", "bash", "sh", "pwsh", "powershell", "cmd", "curl", "wget", "ssh"}

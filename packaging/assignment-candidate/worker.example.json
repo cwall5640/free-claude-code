@@ -5,5 +5,7 @@
   "comment_signature": "— dev:claude1",
   "waiting_label": "waiting:claude1",
   "github_login": "claude1",
-  "verdict_key_file": ""
+  "verdict_key_file": "",
+  "slack_enabled": false,
+  "slack_channel_id": ""
 }

@@ -11,6 +11,7 @@ _PATTERNS = (
     re.compile(r"gho_[A-Za-z0-9]{20,}"),
     re.compile(r"nvapi-[A-Za-z0-9_-]{16,}"),
     re.compile(r"sk-[A-Za-z0-9]{20,}"),
+    re.compile(r"xox[bpasr]-[A-Za-z0-9-]{8,}"),
     re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]{8,}"),
     re.compile(r"(?i)(api[_-]?key|token|secret)\s*[:=]\s*\S+"),
 )

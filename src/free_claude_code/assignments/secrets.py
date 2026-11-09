@@ -39,6 +39,7 @@ _NAMES = (
     "github_publish",
     "grant_key",
     "proxy_auth",
+    "slack_bot",
 )
 
 

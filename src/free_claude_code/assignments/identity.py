@@ -24,6 +24,8 @@ class WorkerIdentity:
     waiting_label: str
     github_login: str
     verdict_key_file: Path | None = None
+    slack_channel_id: str = ""
+    slack_enabled: bool = False
 
     def comment_suffix(self) -> str:
         return f"\n{self.comment_signature}\n"
@@ -66,6 +68,8 @@ def load_worker_identity(path: Path) -> WorkerIdentity:
         waiting_label=str(raw.get("waiting_label", "")).strip(),
         github_login=str(raw.get("github_login", "")).strip(),
         verdict_key_file=key_path,
+        slack_channel_id=str(raw.get("slack_channel_id", "")).strip(),
+        slack_enabled=_slack_enabled(raw),
     )
     validate_worker_identity(identity)
     return identity
@@ -84,3 +88,14 @@ def validate_worker_identity(identity: WorkerIdentity) -> None:
         raise Forbidden("comment signature must name this actor")
     if not identity.github_login:
         raise Forbidden("worker github login is required")
+    if identity.slack_channel_id and not re.fullmatch(r"C[A-Z0-9]{8,}", identity.slack_channel_id):
+        raise Forbidden("slack channel id must be one channel")
+    if identity.slack_enabled and not identity.slack_channel_id:
+        raise Forbidden("slack handoff needs the configured channel id")
+
+
+def _slack_enabled(raw: dict[str, object]) -> bool:
+    flag = raw.get("slack_enabled", False)
+    if not isinstance(flag, bool):
+        raise Forbidden("slack_enabled must be a boolean")
+    return flag

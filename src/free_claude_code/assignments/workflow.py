@@ -64,6 +64,9 @@ PUBLISHER_ENV = (
     "GH_TOKEN",
     "GH_ENTERPRISE_TOKEN",
     "FCC_PUBLISH_TOKEN",
+    "SLACK_BOT_TOKEN",
+    "SLACK_TOKEN",
+    "SLACK_API_TOKEN",
 )
 
 CAPABILITY_BOUNDARY = {
@@ -82,6 +85,7 @@ CAPABILITY_BOUNDARY = {
     "manager_attestation": "one_signature_covers_execute_and_publish",
     "worker_identity": "per_install_config",
     "handoff_actors": "briefing_set_plus_claudeN_manager_map_is_config",
+    "slack_handoff": "disabled_bot_token_one_channel_chat_post_message",
     "issue_creation": "unsupported_http_403_no_alternate_principal",
     "merge": "refused",
     "hosted_or_paid_ci": "refused",
@@ -691,6 +695,7 @@ class AssignmentCandidate:
         self.publish_enabled = False
         self.publish_origin = ""
         self.publish_ca_file = None
+        self.slack_api_base = ""
         self.verdict_key_file = self.identity.verdict_key_file
 
     def create_issue(self) -> None:
@@ -904,6 +909,38 @@ class AssignmentCandidate:
         if any(name in child_env for name in PUBLISHER_ENV):
             raise Forbidden("publisher credential reached a child environment")
 
+    def _deliver_slack(self, line: str) -> None:
+        """Post the handoff when this worker's poster is enabled. Failure keeps the line."""
+
+        if not self.identity.slack_enabled:
+            return
+        config_path = self.paths.state_dir / "slack-config.json"
+        state_dir = self.paths.state_dir / "slack"
+        _atomic_json(
+            config_path,
+            {
+                "api_base": self.slack_api_base,
+                "channel_id": self.identity.slack_channel_id,
+                "enabled": True,
+                "secrets_file": str(self.paths.secrets_file),
+                "state_dir": str(state_dir),
+                "text": line,
+            },
+        )
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "free_claude_code.assignments.slack_poster", "--config", str(config_path)],
+                cwd=self.paths.state_dir,
+                env=_child_env(),
+                shell=False,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return
+
     def _publisher_login(self) -> str:
         token = load_secret_file(self.paths.secrets_file).get("github_publish")
         client = GitHubHttpClient(self.api.base_url, token, timeout=self.api.timeout)
@@ -1031,7 +1068,9 @@ class AssignmentCandidate:
         )
         self.api.post_issue_comment(self.owner, self.repo, number, handoff, timeout=self.api.timeout)
         task_id = attestation.task_id.lower()
-        return f"HANDOFF: {task_id} | {url} | {head} | {verdict} | NEXT: {actor}"
+        line = f"HANDOFF: {task_id} | {url} | {head} | {verdict} | NEXT: {actor}"
+        self._deliver_slack(line)
+        return line
 
     def review_pull(self, number: int) -> dict[str, object]:
         """Read-only review. A PASS is a signed comment, never a merge approval."""
