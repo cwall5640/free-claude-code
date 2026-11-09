@@ -178,14 +178,18 @@ def scrub_env(source: Mapping[str, str]) -> dict[str, str]:
 
 
 def resolve_program(program: str) -> str:
-    """Find an executable. On Windows, python3 and a shebang name are not enough."""
+    """Find an executable. On Windows, python3 and a .cmd shim are not enough."""
 
     if program == sys.executable:
         return program
     candidate = Path(program)
-    if candidate.is_file():
-        return str(candidate)
     name = candidate.name.lower()
+    if os.name == "nt" and name in {"git", "git.exe", "git.cmd", "git.bat"}:
+        git_exe = _windows_git_exe()
+        if git_exe:
+            return git_exe
+    if candidate.is_file() and candidate.suffix.lower() not in {".cmd", ".bat"}:
+        return str(candidate.resolve())
     python_names = {"python", "python3", "python.exe", "python3.exe"}
     if os.name == "nt" and name in python_names:
         return sys.executable
@@ -195,6 +199,27 @@ def resolve_program(program: str) -> str:
     if name in python_names:
         return sys.executable
     return program
+
+
+def _windows_git_exe() -> str:
+    found = shutil.which("git.exe")
+    if found:
+        return found
+    wrapped = shutil.which("git")
+    if not wrapped:
+        return ""
+    wrapped_path = Path(wrapped)
+    if wrapped_path.suffix.lower() == ".exe":
+        return str(wrapped_path)
+    parent = wrapped_path.resolve().parent
+    for candidate in (
+        parent / "git.exe",
+        parent.parent / "bin" / "git.exe",
+        parent.parent / "mingw64" / "bin" / "git.exe",
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return ""
 
 
 def parse_unittest(output: str) -> tuple[int, int, int, int]:
@@ -243,8 +268,7 @@ class GitWorkspace:
     def materialize(self, source: Path, sha: str, branch: str) -> str:
         if branch in {"main", "master"} or ".." in branch.split("/"):
             raise Forbidden("refusing protected or unsafe branch name")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._run(("clone", "--local", str(source), str(self.path)), cwd=self.path.parent)
+        self._clone_local(source)
         self._run(("checkout", "--detach", sha), cwd=self.path)
         self._run(("switch", "-c", branch), cwd=self.path)
         head = self.head()
@@ -257,8 +281,7 @@ class GitWorkspace:
     def materialize_detached(self, source: Path, sha: str) -> str:
         """Clone and detach at one SHA. This does not create or push a branch."""
 
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._run(("clone", "--local", str(source), str(self.path)), cwd=self.path.parent)
+        self._clone_local(source)
         self._run(("checkout", "--detach", sha), cwd=self.path)
         head = self.head()
         if head != sha:
@@ -305,6 +328,17 @@ class GitWorkspace:
         self._run(("commit", "-m", message, "--", *safe), cwd=self.path)
         return self.head()
 
+    def _clone_local(self, source: Path) -> None:
+        destination = self.path.expanduser().resolve(strict=False)
+        parent = destination.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        if not parent.is_dir():
+            raise Forbidden("git clone parent is not a directory")
+        self.path = destination
+        self._run(("clone", "--local", str(Path(source).expanduser().resolve()), str(destination)), cwd=parent)
+        if not destination.is_dir():
+            raise Forbidden("git clone did not create the workspace")
+
     def _run(self, args: tuple[str, ...], *, cwd: Path, check: bool = True) -> str:
         if not args or args[0] in _GIT_FORBIDDEN:
             raise MergeRejected("git subcommand is not available")
@@ -322,9 +356,12 @@ class GitWorkspace:
                 "GIT_CONFIG_GLOBAL": os.devnull,
             }
         )
+        directory = Path(cwd).expanduser().resolve(strict=False)
+        if not directory.is_dir():
+            raise Forbidden(f"git {args[0]} cwd is not a directory")
         completed = subprocess.run(
             (resolve_program("git"), *args),
-            cwd=cwd,
+            cwd=str(directory),
             env=env,
             shell=False,
             check=False,
@@ -382,6 +419,9 @@ class Sandbox:
         argv = vet_command(approval.argv, self.allowed)
         argv = (resolve_program(argv[0]), *argv[1:])
         env = scrub_env(os.environ if env is None else env)
+        work = Path(self.root).expanduser().resolve(strict=False)
+        if not work.is_dir():
+            raise Forbidden("command cwd is not a directory")
         started = time.monotonic()
         timed_out = False
         cancelled = False
@@ -389,7 +429,7 @@ class Sandbox:
         stdout = stderr = ""
         process = subprocess.Popen(
             argv,
-            cwd=self.root,
+            cwd=str(work),
             env=env,
             shell=False,
             stdout=subprocess.PIPE,
@@ -596,13 +636,17 @@ class NvidiaClaudeLauncher:
             if name != "ANTHROPIC_AUTH_TOKEN":
                 env.pop(name, None)
         self.last_argv = argv
-        contained(workspace, workspace)
+        directory = Path(workspace).expanduser().resolve(strict=False)
+        contained(directory, directory)
+        if not directory.is_dir():
+            raise Forbidden("model cwd is not a directory")
         if spawn is None:
-            if not Path(self.claude_bin).is_file():
+            program = resolve_program(argv[0])
+            if not Path(program).is_file():
                 raise Forbidden("claude binary is not available")
-            subprocess.run(argv, cwd=workspace, env=env, shell=False, check=False)
+            subprocess.run((program, *argv[1:]), cwd=str(directory), env=env, shell=False, check=False)
         else:
-            spawn(argv, env, workspace)
+            spawn(argv, env, directory)
         self.spawned = True
 
 

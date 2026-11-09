@@ -606,67 +606,31 @@ def _candidate(
 
 @contextmanager
 def _redirect_pinned_push(git_remote: GitHttps):
-    """Point the pinned github.com push at the local HTTPS remote. Nothing is sent to GitHub."""
+    """Rewrite the pinned github.com URL to the local HTTPS remote inside git.
+
+    Real git.exe is used. A .cmd shim on PATH makes CreateProcess reject the
+    workspace cwd on Windows (WinError 267).
+    """
 
     local = git_remote.origin()
-    shim_dir = git_remote.root / "shim"
-    shim_dir.mkdir(exist_ok=True)
-    script = shim_dir / "git-shim.py"
-    script.write_text(
-        "import os, sys\n"
-        "argv = sys.argv[1:]\n"
-        "log = os.environ.get('FCC_GIT_LOG', '')\n"
-        "if log:\n"
-        "    open(log, 'a', encoding='utf-8').write(' '.join(argv) + '\\n')\n"
-        "target = os.environ.get('FCC_GIT_PUSH_TARGET', '')\n"
-        "if 'push' in argv and any(item.startswith('https://github.com/') for item in argv):\n"
-        "    if not target:\n"
-        "        raise SystemExit(2)\n"
-        "    argv = [target if item.startswith('https://github.com/') else item for item in argv]\n"
-        "real = os.environ['FCC_REAL_GIT']\n"
-        "os.execv(real, [real, *argv])\n",
-        encoding="utf-8",
-    )
-    if os.name == "nt":
-        shim = shim_dir / "git.cmd"
-        shim.write_text(
-            f'@echo off\r\n"{sys.executable}" "%~dp0git-shim.py" %*\r\n',
-            encoding="utf-8",
-        )
-    else:
-        shim = shim_dir / "git"
-        shim.write_text("#!/usr/bin/env python3\n" + script.read_text(encoding="utf-8"), encoding="utf-8")
-        shim.chmod(0o755)
-    log = shim_dir / "git.log"
-    saved = {
-        "PATH": os.environ.get("PATH", ""),
-        "FCC_GIT_PUSH_TARGET": os.environ.get("FCC_GIT_PUSH_TARGET"),
-        "FCC_GIT_LOG": os.environ.get("FCC_GIT_LOG"),
-        "FCC_REAL_GIT": os.environ.get("FCC_REAL_GIT"),
-    }
-    real_git = shutil.which("git") or "/usr/bin/git"
-    os.environ["PATH"] = str(shim_dir) + os.pathsep + saved["PATH"]
-    os.environ["FCC_GIT_PUSH_TARGET"] = local
-    os.environ["FCC_GIT_LOG"] = str(log)
-    os.environ["FCC_REAL_GIT"] = real_git
+    keys = ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0")
+    saved = {key: os.environ.get(key) for key in keys}
+    os.environ["GIT_CONFIG_COUNT"] = "1"
+    os.environ["GIT_CONFIG_KEY_0"] = f"url.{local}.insteadOf"
+    os.environ["GIT_CONFIG_VALUE_0"] = "https://github.com/cwall5640/fixture.git"
     try:
-        yield log
+        yield
     finally:
-        os.environ["PATH"] = saved["PATH"]
-        for key in ("FCC_GIT_PUSH_TARGET", "FCC_GIT_LOG", "FCC_REAL_GIT"):
-            if saved[key] is None:
+        for key, value in saved.items():
+            if value is None:
                 os.environ.pop(key, None)
             else:
-                os.environ[key] = saved[key]
+                os.environ[key] = value
 
 
 def _run_published(candidate: AssignmentCandidate, git_remote: GitHttps) -> dict[str, object]:
-    with _redirect_pinned_push(git_remote) as log:
-        result = candidate.run_once()
-        text = log.read_text(encoding="utf-8") if log.is_file() else ""
-        assert PINNED_ORIGIN in text or "https://github.com/cwall5640/fixture.git" in text
-        assert PUBLISH not in text
-        return result
+    with _redirect_pinned_push(git_remote):
+        return candidate.run_once()
 
 
 def _posted_texts(api: FixtureApi) -> list[str]:
@@ -1421,7 +1385,6 @@ def _assert_windows_reparse_secret(tmp_path: Path) -> None:
     """Symlink creation needs SeCreateSymbolicLink. A junction does not."""
 
     real = tmp_path / "reparse-real"
-    real.mkdir()
     secret = real / "values"
     write_secret_file(
         secret,

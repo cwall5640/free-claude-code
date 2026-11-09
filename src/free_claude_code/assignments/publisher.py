@@ -130,9 +130,12 @@ def publish_feature(
             raise MergeRejected("force pushes and tags are refused")
         if token in pinned or token in " ".join(command):
             raise Forbidden("publish token must not be placed on argv")
+        workspace_dir = Path(workspace).expanduser().resolve(strict=False)
+        if not workspace_dir.is_dir():
+            raise Forbidden("publisher workspace is not a directory")
         completed = subprocess.run(
             command,
-            cwd=workspace,
+            cwd=str(workspace_dir),
             env=env,
             shell=False,
             check=False,

@@ -38,6 +38,7 @@ from free_claude_code.assignments.execution import (
     GitWorkspace,
     NativeCommandApproval,
     Sandbox,
+    resolve_program,
     scrub_env,
 )
 from free_claude_code.assignments.github_http import GitHubHttpClient
@@ -613,9 +614,12 @@ def push_local_feature(workspace: Path, remote: Path, branch: str) -> None:
             "GIT_CONFIG_GLOBAL": os.devnull,
         }
     )
+    directory = Path(workspace).expanduser().resolve(strict=False)
+    if not directory.is_dir():
+        raise Forbidden("local feature push cwd is not a directory")
     completed = __import__("subprocess").run(
-        ("git", "push", remote_text, f"{branch}:{branch}"),
-        cwd=workspace,
+        (resolve_program("git"), "push", str(Path(remote).expanduser().resolve()), f"{branch}:{branch}"),
+        cwd=str(directory),
         env=env,
         shell=False,
         check=False,
@@ -920,7 +924,7 @@ class AssignmentCandidate:
         try:
             subprocess.run(
                 [sys.executable, "-m", "free_claude_code.assignments.slack_poster", "--config", str(config_path)],
-                cwd=self.paths.state_dir,
+                cwd=str(Path(self.paths.state_dir).expanduser().resolve(strict=False)),
                 env=_child_env(),
                 shell=False,
                 check=False,
@@ -1014,7 +1018,7 @@ class AssignmentCandidate:
         _atomic_json(config_path, raw)
         completed = subprocess.run(
             [sys.executable, "-m", "free_claude_code.assignments.publisher", "--config", str(config_path)],
-            cwd=self.paths.state_dir,
+            cwd=str(Path(self.paths.state_dir).expanduser().resolve(strict=False)),
             env=_child_env(),
             shell=False,
             check=False,
@@ -1131,7 +1135,7 @@ class AssignmentCandidate:
         )
         completed = subprocess.run(
             [sys.executable, "-m", "free_claude_code.assignments.verdict_sign", "--config", str(config_path)],
-            cwd=self.paths.state_dir,
+            cwd=str(Path(self.paths.state_dir).expanduser().resolve(strict=False)),
             env=_child_env(),
             shell=False,
             check=False,

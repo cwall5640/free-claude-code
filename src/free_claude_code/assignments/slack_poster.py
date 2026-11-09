@@ -90,7 +90,12 @@ def post_handoff(
     if token in line or token in endpoint or token in channel_id:
         raise Forbidden("slack token must not be placed in the message")
     state_dir.mkdir(parents=True, exist_ok=True)
-    os.chmod(state_dir, 0o700)
+    if os.name == "nt":
+        from free_claude_code.assignments.windows_acl import harden_path
+
+        harden_path(state_dir)
+    else:
+        os.chmod(state_dir, 0o700)
     record = state_dir / "posted.txt"
     digest = hashlib.sha256(line.encode("utf-8")).hexdigest()
     if digest in _read_posted(record):
