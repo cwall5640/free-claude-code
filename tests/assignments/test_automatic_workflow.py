@@ -19,7 +19,7 @@ import pytest
 
 from free_claude_code.assignments.candidate import main as candidate_main
 from free_claude_code.assignments.cli import main as cli_main
-from free_claude_code.assignments.errors import ApprovalInvalid, Conflict, Disabled, Forbidden, MergeRejected
+from free_claude_code.assignments.errors import ApprovalInvalid, Conflict, Disabled, Forbidden, MergeRejected, TimedOut
 from free_claude_code.assignments.execution import scrub_env
 from free_claude_code.assignments.github_http import GitHubHttpClient
 from free_claude_code.assignments.handoff import actor_label, assert_handoff_label, load_actor_map
@@ -1791,3 +1791,23 @@ def test_run_once_with_main_base_and_configured_prefixes(tmp_path: Path) -> None
         f"{result['head_sha']}:changes/widget.py",
     )
     assert "return value * factor" in shown
+
+
+def test_run_once_enforces_configured_command_timeout(tmp_path: Path) -> None:
+    """A command slower than the configured timeout dies with TimedOut.
+
+    With the previously hardcoded 10 seconds the 3-second sleeper would
+    pass the sandbox; the configured 0.5 seconds must kill it.
+    """
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    sleeper = tmp_path / "sleeper.py"
+    sleeper.write_text("import time\ntime.sleep(3)\n", encoding="utf-8")
+    api = FixtureApi(sha)
+    try:
+        candidate = _candidate(tmp_path, api, sha, sleeper)
+        candidate.command_timeout_seconds = 0.5
+        with pytest.raises(TimedOut):
+            candidate.run_once()
+    finally:
+        api.stop()

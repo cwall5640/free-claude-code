@@ -6,6 +6,7 @@ replayed handoff exits immediately. The publisher still cannot merge.
 """
 
 import json
+import math
 import time
 from pathlib import Path
 
@@ -27,6 +28,8 @@ from free_claude_code.assignments.workflow import (
 
 POLL_INTERVAL_SECONDS = 30.0
 POLL_LIMIT = 20
+COMMAND_TIMEOUT_SECONDS = 10.0
+COMMAND_TIMEOUT_MAX_SECONDS = 3600.0
 KILL_NAME = "KILL"
 _QUIET = frozenset(
     {
@@ -132,6 +135,15 @@ def _runtime(config: Path) -> dict[str, object]:
     reviewer = str(raw.get("reviewer_id", "")).strip()
     if not operator or not reviewer or operator == reviewer:
         raise Forbidden("publication needs an independent reviewer")
+    timeout = raw.get("command_timeout_seconds", COMMAND_TIMEOUT_SECONDS)
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout < COMMAND_TIMEOUT_SECONDS
+        or timeout > COMMAND_TIMEOUT_MAX_SECONDS
+    ):
+        raise Forbidden("runtime command timeout is out of bounds")
     interval = raw.get("poll_interval_seconds", POLL_INTERVAL_SECONDS)
     limit = raw.get("poll_limit", POLL_LIMIT)
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > POLL_LIMIT:
@@ -140,6 +152,7 @@ def _runtime(config: Path) -> dict[str, object]:
         raise Forbidden("poll interval is out of bounds")
     return {
         "allowed_command": tuple(command),
+        "command_timeout_seconds": float(timeout),
         "allowed_path_prefixes": allowed_path_prefixes,
         "audience": str(raw.get("audience", "")).strip(),
         "ca_file": str(raw.get("ca_file", "")).strip(),
@@ -201,6 +214,7 @@ def _candidate(state: Path, config: Path, runtime: dict[str, object]) -> Assignm
         allowed_command=tuple(runtime["allowed_command"]),
         command_cwd=str(runtime["command_cwd"]),
         allowed_path_prefixes=tuple(runtime["allowed_path_prefixes"]),
+        command_timeout_seconds=float(runtime["command_timeout_seconds"]),
         repair_limit=REPAIR_LIMIT,
         identity=identity,
     )
