@@ -108,13 +108,19 @@ def main(argv: list[str] | None = None) -> int:
     publish = sub.add_parser("publish")
     publish.add_argument("--reviewer", required=True)
     sub.add_parser("show-contract")
-    sub.add_parser("install-startup")
+    install = sub.add_parser("install-startup")
+    install.add_argument("--root")
     sub.add_parser("activate")
     args = parser.parse_args(argv)
     if args.command in {"show-contract", "install-startup", "activate"}:
         from free_claude_code.assignments.workflow import candidate_command
 
-        return candidate_command(args.command)
+        try:
+            root = Path(args.root) if getattr(args, "root", None) else None
+            return candidate_command(args.command, root)
+        except AssignmentError as exc:
+            print(json.dumps({"ok": False, "error": exc.code, "detail": redact(str(exc))}))
+            return 2
     if not args.config:
         print(json.dumps({"ok": False, "error": "disabled", "detail": "config is required"}))
         return 2

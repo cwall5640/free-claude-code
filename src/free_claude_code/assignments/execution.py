@@ -231,6 +231,12 @@ class GitWorkspace:
     def head(self) -> str:
         return self._run(("rev-parse", "HEAD"), cwd=self.path).strip()
 
+    def branch_name(self) -> str:
+        name = self._run(("rev-parse", "--abbrev-ref", "HEAD"), cwd=self.path).strip()
+        if name in {"", "HEAD", "main", "master"}:
+            raise Forbidden("checked out branch is missing or protected")
+        return name
+
     def ancestry_contains(self, ancestor: str, descendant: str) -> bool:
         result = self._run(
             ("merge-base", "--is-ancestor", ancestor, descendant),
@@ -315,6 +321,7 @@ class Sandbox:
         manifest: TaskManifest,
         head_sha: str,
         cancellation: CancellationToken | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> CommandEvidence:
         if approval.manifest_id != manifest.manifest_id:
             raise ApprovalInvalid("command approval is for a different task")
@@ -323,7 +330,7 @@ class Sandbox:
         token = cancellation or CancellationToken()
         token.raise_if_cancelled()
         argv = vet_command(approval.argv, self.allowed)
-        env = scrub_env(os.environ)
+        env = scrub_env(os.environ if env is None else env)
         started = time.monotonic()
         timed_out = False
         cancelled = False

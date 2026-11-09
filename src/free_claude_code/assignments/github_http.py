@@ -45,6 +45,44 @@ class GitHubHttpClient:
             node_id=str(payload.get("node_id", "")),
         )
 
+    def fetch_permissions(self, owner: str, repo: str, *, timeout: float) -> dict[str, bool]:
+        payload = self._json(
+            "GET", f"/repos/{_seg(owner)}/{_seg(repo)}", timeout=timeout
+        )
+        raw = payload.get("permissions")
+        if not isinstance(raw, dict):
+            raise Forbidden("repository response did not include permissions")
+        return {
+            "admin": bool(raw.get("admin")),
+            "maintain": bool(raw.get("maintain")),
+            "pull": bool(raw.get("pull")),
+            "push": bool(raw.get("push")),
+            "triage": bool(raw.get("triage")),
+        }
+
+    def fetch_issue_labels(self, owner: str, repo: str, number: int, *, timeout: float) -> tuple[str, ...]:
+        payload = self._json(
+            "GET", f"/repos/{_seg(owner)}/{_seg(repo)}/issues/{number}", timeout=timeout
+        )
+        return _label_names(payload.get("labels"))
+
+    def list_labeled_issues(
+        self, owner: str, repo: str, label: str, *, timeout: float
+    ) -> tuple[int, ...]:
+        raw = self._bytes(
+            "GET",
+            f"/repos/{_seg(owner)}/{_seg(repo)}/issues?labels={quote(label, safe='')}&state=open",
+            timeout=timeout,
+        )
+        loaded = json.loads(raw.decode("utf-8"))
+        if not isinstance(loaded, list):
+            raise Forbidden("labeled issue response was not a list")
+        numbers: list[int] = []
+        for item in loaded:
+            if isinstance(item, dict) and isinstance(item.get("number"), int):
+                numbers.append(item["number"])
+        return tuple(numbers)
+
     def fetch_branch_sha(
         self, owner: str, repo: str, branch: str, *, timeout: float
     ) -> str:
@@ -177,6 +215,18 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         newurl: str,
     ) -> urllib.request.Request | None:
         raise Forbidden("refusing an API redirect")
+
+
+def _label_names(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        return ()
+    names: list[str] = []
+    for item in raw:
+        if isinstance(item, str):
+            names.append(item)
+        elif isinstance(item, dict) and isinstance(item.get("name"), str):
+            names.append(item["name"])
+    return tuple(names)
 
 
 def _seg(value: str) -> str:

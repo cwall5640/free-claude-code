@@ -3,15 +3,15 @@
   "activation_enabled": false,
   "startup_installed": false,
   "do_not_run": [
-    "do not create a Windows sign-in task",
+    "do not register a Windows sign-in task",
     "do not change power or sleep settings",
     "do not register a runner",
-    "do not enable the assignment config",
-    "do not merge a pull request"
+    "do not set the candidate enabled flag",
+    "do not merge a pull request",
+    "do not push to a network git remote"
   ],
   "rollback_if_a_later_approval_installs_it": [
-    "set activation_enabled false",
-    "remove only the candidate state directory named in that later approval",
+    "delete only the disposable root passed to Install",
     "leave the original Free Claude Code install, Inkbound runners, and the pilot repository untouched"
   ]
 }
