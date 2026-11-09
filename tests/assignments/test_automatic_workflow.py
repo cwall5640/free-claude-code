@@ -279,7 +279,9 @@ class GitHttps(threading.Thread):
             env=env,
         )
         expected = "Basic " + base64.b64encode(b"x-access-token:" + token.encode()).decode("ascii")
-        backend = _resolve_tool("git-http-backend")
+        backend = _git_http_backend()
+        if backend is None:
+            pytest.skip("git-http-backend was not found via git --exec-path")
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -363,22 +365,11 @@ def _resolve_tool(name: str) -> str:
     found = shutil.which(name)
     if found:
         return found
-    if name == "git-http-backend":
-        for candidate in (
-            Path("/usr/lib/git-core/git-http-backend"),
-            Path("/usr/libexec/git-core/git-http-backend"),
-        ):
-            if candidate.is_file():
-                return str(candidate)
     if os.name == "nt":
         program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
         relatives = {
             "git": ("Git\\cmd\\git.exe", "Git\\bin\\git.exe"),
             "openssl": ("Git\\usr\\bin\\openssl.exe", "Git\\mingw64\\bin\\openssl.exe"),
-            "git-http-backend": (
-                "Git\\mingw64\\libexec\\git-core\\git-http-backend.exe",
-                "Git\\usr\\libexec\\git-core\\git-http-backend.exe",
-            ),
         }
         for relative in relatives.get(name, ()):
             candidate = Path(program_files) / relative
@@ -387,6 +378,38 @@ def _resolve_tool(name: str) -> str:
     if name in {"python", "python3"}:
         return sys.executable
     return name
+
+
+def _git_http_backend() -> str | None:
+    """Locate git-http-backend. Git for Windows keeps it in `git --exec-path`, not on PATH."""
+
+    names = ("git-http-backend.exe", "git-http-backend") if os.name == "nt" else ("git-http-backend",)
+    git = _resolve_tool("git")
+    if Path(git).is_file() or shutil.which(git):
+        completed = subprocess.run(
+            [git, "--exec-path"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={
+                "PATH": os.environ.get("PATH", ""),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+            },
+        )
+        if completed.returncode == 0 and completed.stdout.strip():
+            exec_path = Path(completed.stdout.strip())
+            for name in names:
+                candidate = exec_path / name
+                if candidate.is_file():
+                    return str(candidate)
+    for candidate in (
+        Path("/usr/lib/git-core/git-http-backend"),
+        Path("/usr/libexec/git-core/git-http-backend"),
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def _git(cwd: Path, *args: str) -> str:
