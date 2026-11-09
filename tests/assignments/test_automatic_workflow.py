@@ -4,10 +4,13 @@
 import base64
 import json
 import os
+import shutil
 import ssl
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
@@ -19,6 +22,8 @@ from free_claude_code.assignments.cli import main as cli_main
 from free_claude_code.assignments.errors import ApprovalInvalid, Conflict, Disabled, Forbidden, MergeRejected
 from free_claude_code.assignments.execution import scrub_env
 from free_claude_code.assignments.github_http import GitHubHttpClient
+from free_claude_code.assignments.handoff import actor_label, assert_handoff_label, load_actor_map
+from free_claude_code.assignments.identity import WorkerIdentity, default_worker_identity, load_worker_identity
 from free_claude_code.assignments.grants import ModelGrant, sign_grant
 from free_claude_code.assignments.managers import load_manager_config
 from free_claude_code.assignments.publisher import feature_branch, publish_feature, refuse_push_ref
@@ -47,6 +52,14 @@ from tests.assignments.manager_sign import new_key, sign_attestation
 PUBLISH = "publish-token-value"
 VIBE_SECRET, VIBE_PUBLIC = new_key()
 WAITING = DEFAULT_WAITING_LABEL
+PINNED_ORIGIN = "https://github.com/cwall5640/fixture.git"
+
+
+def _path_number(path: str) -> int | None:
+    tail = path.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+    if tail.isdigit():
+        return int(tail)
+    return None
 
 
 class FixtureApi(threading.Thread):
@@ -61,6 +74,9 @@ class FixtureApi(threading.Thread):
         self.pr_sha = sha
         self.pr_sha_next = sha
         self.pr_reads = 0
+        self.has_pull = True
+        self.token_login = "claude1"
+        self.issue_labels: dict[int, list[str]] | None = None
         self.permissions = {"admin": False, "maintain": False, "pull": True, "push": True, "triage": False}
         self.posts: list[tuple[str, str]] = []
         self.bodies: list[str] = []
@@ -69,36 +85,30 @@ class FixtureApi(threading.Thread):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
                 path = self.path
+                if path.split("?", 1)[0] == "/user":
+                    self._json({"login": outer.token_login})
+                    return
                 if "labels=" in path:
                     requested = unquote(path.split("labels=", 1)[1].split("&", 1)[0])
-                    if requested not in outer.labels:
-                        self._json([])
-                    else:
-                        self._json([{"number": 9, "labels": [{"name": requested}]}])
+                    self._json(outer.labeled_issues(requested))
                     return
                 if path.endswith("/comments"):
                     self._json(outer.comments)
                     return
-                if path.endswith("/pulls/9"):
+                number = _path_number(path)
+                if "/pulls/" in path and number is not None:
+                    if not outer.has_pull or number not in outer.pull_numbers():
+                        self.send_error(404)
+                        return
                     outer.pr_reads += 1
                     current = outer.pr_sha if outer.pr_reads == 1 else outer.pr_sha_next
-                    head: dict[str, object] = {"sha": current, "ref": "claude1/fix-add"}
+                    head: dict[str, object] = {"sha": current, "ref": f"review/{number}"}
                     if outer.pusher:
                         head["user"] = {"login": outer.pusher}
-                    self._json({"number": 9, "user": {"login": outer.author}, "head": head})
+                    self._json({"number": number, "user": {"login": outer.author}, "head": head})
                     return
-                if path.endswith("/issues/9"):
-                    self._json(
-                        {
-                            "number": 9,
-                            "title": "Fix add",
-                            "body": "untrusted text is not a command",
-                            "state": "open",
-                            "updated_at": "2026-11-09T02:00:00Z",
-                            "node_id": "NODE9",
-                            "labels": [{"name": name} for name in outer.labels],
-                        }
-                    )
+                if "/issues/" in path and number is not None and outer.serves_issue(number):
+                    self._json(outer.issue_payload(number))
                     return
                 if path.endswith("/branches/dev"):
                     self._json({"commit": {"sha": outer.sha}})
@@ -159,9 +169,47 @@ class FixtureApi(threading.Thread):
         self.httpd.serve_forever()
 
     def start_url(self) -> str:
-        self.start()
+        if not self.is_alive():
+            self.start()
         host, port = self.httpd.server_address
         return f"http://{host}:{port}"
+
+    def serves_issue(self, number: int) -> bool:
+        if self.issue_labels is not None:
+            return number in self.issue_labels
+        return number == 9
+
+    def pull_numbers(self) -> set[int]:
+        if not self.has_pull:
+            return set()
+        if self.issue_labels is not None:
+            return set(self.issue_labels)
+        return {9}
+
+    def labels_for(self, number: int) -> list[str]:
+        if self.issue_labels is not None:
+            return list(self.issue_labels.get(number, []))
+        return list(self.labels) if number == 9 else []
+
+    def labeled_issues(self, label: str) -> list[dict[str, object]]:
+        if self.issue_labels is not None:
+            numbers = [number for number, names in sorted(self.issue_labels.items()) if label in names]
+        elif label in self.labels:
+            numbers = [9]
+        else:
+            numbers = []
+        return [{"number": number, "labels": [{"name": label}]} for number in numbers]
+
+    def issue_payload(self, number: int) -> dict[str, object]:
+        return {
+            "number": number,
+            "title": "Fix add",
+            "body": "untrusted text is not a command",
+            "state": "open",
+            "updated_at": "2026-11-09T02:00:00Z",
+            "node_id": f"NODE{number}",
+            "labels": [{"name": name} for name in self.labels_for(number)],
+        }
 
     def stop(self) -> None:
         self.httpd.server_close()
@@ -296,7 +344,8 @@ class GitHttps(threading.Thread):
         self.httpd.serve_forever()
 
     def origin(self) -> str:
-        self.start()
+        if not self.is_alive():
+            self.start()
         host, port = self.httpd.server_address
         return f"https://{host}:{port}/repo.git"
 
@@ -384,10 +433,10 @@ def _attestation(sha: str, *, nonce: str = "nonce-1", expires: int = 5_000, secr
     return sign_attestation(secret, ManagerAttestation(**raw))  # type: ignore[arg-type]
 
 
-def _write_inbox(inbox: Path, attestation: ManagerAttestation) -> None:
+def _write_inbox(inbox: Path, attestation: ManagerAttestation, number: int = 9) -> None:
     inbox.mkdir(exist_ok=True)
     os.chmod(inbox, 0o700)
-    (inbox / "9.json").write_text(
+    (inbox / f"{number}.json").write_text(
         json.dumps(attestation.signed_body() | {"signature": attestation.signature}, sort_keys=True),
         encoding="utf-8",
     )
@@ -419,10 +468,12 @@ def _verifier(
     roles = {principal: role}
     names = {principal: name}
     interim_until = {principal: interim} if interim else {}
+    handoff = {principal: _handoff_actor(name)}
     for item_id, (item_key, item_role, item_name, item_interim) in (extra or {}).items():
         keys[item_id] = item_key
         roles[item_id] = item_role
         names[item_id] = item_name
+        handoff[item_id] = _handoff_actor(item_name)
         if item_interim:
             interim_until[item_id] = item_interim
     return ManagerVerifier(
@@ -434,7 +485,12 @@ def _verifier(
         state_dir=directory,
         revocations=revocations,
         interim_until=interim_until,
+        handoff_actors=handoff,
     )
+
+
+def _handoff_actor(display_name: str) -> str:
+    return {"Minerva": "Minerva", "Project Manager": "Grok", "Vibe Coder": "Casey"}.get(display_name, "Casey")
 
 
 def _check(verifier: ManagerVerifier, attestation: ManagerAttestation, **overrides: str) -> None:
@@ -458,6 +514,8 @@ def _candidate(
     name: str = "run",
     publish: GitHttps | None = None,
     interim: str = "",
+    identity: WorkerIdentity | None = None,
+    issue_number: int = 9,
 ) -> AssignmentCandidate:
     url = api.start_url()
     slot = tmp / name
@@ -468,7 +526,16 @@ def _candidate(
     bare = slot / "bare.git"
     bare.parent.mkdir(parents=True, exist_ok=True)
     _git(slot, "init", "--bare", str(bare))
-    _write_inbox(slot / "inbox", _attestation(sha))
+    worker = identity or default_worker_identity()
+    _write_inbox(
+        slot / "inbox",
+        _attestation(
+            sha,
+            issue_number=issue_number,
+            issue_node_id=f"NODE{issue_number}",
+        ),
+        issue_number,
+    )
     candidate = AssignmentCandidate(
         enabled=enabled,
         owner="cwall5640",
@@ -490,12 +557,71 @@ def _candidate(
         reviewer_id="reviewer",
         allowed_command=(sys.executable, str(script)),
         command_cwd="src",
+        identity=worker,
     )
     if publish is not None:
         candidate.publish_enabled = True
-        candidate.publish_origin = publish.origin()
+        candidate.publish_origin = PINNED_ORIGIN
         candidate.publish_ca_file = publish.cert
+        publish.origin()
     return candidate
+
+
+@contextmanager
+def _redirect_pinned_push(git_remote: GitHttps):
+    """Point the pinned github.com push at the local HTTPS remote. Nothing is sent to GitHub."""
+
+    local = git_remote.origin()
+    shim_dir = git_remote.root / "shim"
+    shim_dir.mkdir(exist_ok=True)
+    shim = shim_dir / "git"
+    shim.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys\n"
+        "argv = sys.argv[1:]\n"
+        "log = os.environ.get('FCC_GIT_LOG', '')\n"
+        "if log:\n"
+        "    open(log, 'a', encoding='utf-8').write(' '.join(argv) + '\\n')\n"
+        "target = os.environ.get('FCC_GIT_PUSH_TARGET', '')\n"
+        "if 'push' in argv and any(item.startswith('https://github.com/') for item in argv):\n"
+        "    if not target:\n"
+        "        raise SystemExit(2)\n"
+        "    argv = [target if item.startswith('https://github.com/') else item for item in argv]\n"
+        "real = os.environ.get('FCC_REAL_GIT', '/usr/bin/git')\n"
+        "os.execv(real, [real, *argv])\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    log = shim_dir / "git.log"
+    saved = {
+        "PATH": os.environ.get("PATH", ""),
+        "FCC_GIT_PUSH_TARGET": os.environ.get("FCC_GIT_PUSH_TARGET"),
+        "FCC_GIT_LOG": os.environ.get("FCC_GIT_LOG"),
+        "FCC_REAL_GIT": os.environ.get("FCC_REAL_GIT"),
+    }
+    real_git = shutil.which("git") or "/usr/bin/git"
+    os.environ["PATH"] = str(shim_dir) + os.pathsep + saved["PATH"]
+    os.environ["FCC_GIT_PUSH_TARGET"] = local
+    os.environ["FCC_GIT_LOG"] = str(log)
+    os.environ["FCC_REAL_GIT"] = real_git
+    try:
+        yield log
+    finally:
+        os.environ["PATH"] = saved["PATH"]
+        for key in ("FCC_GIT_PUSH_TARGET", "FCC_GIT_LOG", "FCC_REAL_GIT"):
+            if saved[key] is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = saved[key]
+
+
+def _run_published(candidate: AssignmentCandidate, git_remote: GitHttps) -> dict[str, object]:
+    with _redirect_pinned_push(git_remote) as log:
+        result = candidate.run_once()
+        text = log.read_text(encoding="utf-8") if log.is_file() else ""
+        assert PINNED_ORIGIN in text or "https://github.com/cwall5640/fixture.git" in text
+        assert PUBLISH not in text
+        return result
 
 
 def _posted_texts(api: FixtureApi) -> list[str]:
@@ -543,7 +669,7 @@ def test_real_repair_loop_commits_any_allowlisted_edit_and_opens_pr(tmp_path: Pa
         candidate = _candidate(
             tmp_path, api, sha, _script(tmp_path, fail_until=3), publish=git_remote, interim="2026-11-11"
         )
-        result = candidate.run_once()
+        result = _run_published(candidate, git_remote)
     finally:
         api.stop()
         git_remote.stop()
@@ -554,7 +680,7 @@ def test_real_repair_loop_commits_any_allowlisted_edit_and_opens_pr(tmp_path: Pa
     assert result["branch"] == "claude1/fix-add"
     assert result["signed_by"] == "vibe-1"
     assert result["signed_by_name"] == "Vibe Coder"
-    assert result["slack"] == f"HANDOFF: fix-add | {result['pr_url']} | {result['head_sha']} | PASS | NEXT: pm"
+    assert result["slack"] == f"HANDOFF: fix-add | {result['pr_url']} | {result['head_sha']} | PASS | NEXT: Casey"
     assert str(result["head_sha"]) in api.bodies[0]
     assert api.posts[0][0].endswith("/pulls")
     assert api.posts[0][1] == f"Bearer {PUBLISH}"
@@ -648,14 +774,17 @@ def test_retry_budget_security_denial_false_ci_and_cancel(tmp_path: Path) -> Non
     api.fail_checks = True
     git_remote = GitHttps(tmp_path / "ci-git", PUBLISH)
     try:
-        held = _candidate(tmp_path, api, sha, _script(tmp_path, fail_until=1), name="ci", publish=git_remote).run_once()
+        held = _run_published(
+            _candidate(tmp_path, api, sha, _script(tmp_path, fail_until=1), name="ci", publish=git_remote),
+            git_remote,
+        )
     finally:
         api.stop()
         git_remote.stop()
     assert held["status"] == "ci_hold"
     assert held["ci"] == "failure"
     assert held["merged"] is False
-    assert held["slack"].endswith("| HOLD | NEXT: pm")
+    assert held["slack"].endswith("| HOLD | NEXT: Casey")
     api = FixtureApi(sha)
     try:
         cancel = _candidate(tmp_path, api, sha, _script(tmp_path, fail_until=1), name="cancel")
@@ -807,7 +936,7 @@ def test_model_launcher_uses_proxy_auth_from_the_secret_file(tmp_path: Path) -> 
             )
 
         candidate.model_grant_factory = factory
-        result = candidate.run_once()
+        result = _run_published(candidate, git_remote)
     finally:
         api.stop()
         git_remote.stop()
@@ -888,6 +1017,7 @@ def test_routing_comments_self_review_and_manager_config(tmp_path: Path) -> None
                 "head_sha": sha,
                 "findings": "local checks passed",
                 "limitations": "local runners only",
+                "actor": default_worker_identity().actor_name,
             },
             signature,
         )
@@ -969,7 +1099,10 @@ def test_publisher_refuses_protected_refs_and_stays_disabled(tmp_path: Path) -> 
     with pytest.raises(MergeRejected):
         refuse_push_ref("refs/tags/v1", tags=True)
     with pytest.raises(MergeRejected):
-        feature_branch("main")
+        feature_branch("main", "claude1")
+    with pytest.raises(Forbidden):
+        feature_branch("fix-add", "main")
+    assert feature_branch("fix-add", "claude2") == "claude2/fix-add"
     with pytest.raises(Disabled):
         publish_feature(
             enabled=False,
@@ -987,6 +1120,8 @@ def test_publisher_refuses_protected_refs_and_stays_disabled(tmp_path: Path) -> 
             author_id="dev:claude1",
             reviewer_id="vibe-1",
             manifest_id="m",
+            branch_prefix="claude1",
+            comment_signature="— dev:claude1",
         )
     with pytest.raises(MergeRejected):
         publish_feature(
@@ -1005,8 +1140,68 @@ def test_publisher_refuses_protected_refs_and_stays_disabled(tmp_path: Path) -> 
             author_id="dev:claude1",
             reviewer_id="vibe-1",
             manifest_id="m",
+            branch_prefix="claude1",
+            comment_signature="— dev:claude1",
             force=True,
         )
+    with pytest.raises(Forbidden, match="github.com"):
+        publish_feature(
+            enabled=True,
+            secrets_file=tmp_path / "missing",
+            workspace=tmp_path,
+            task_id="fix-add",
+            origin="https://127.0.0.1/repo.git",
+            api_base="http://127.0.0.1",
+            owner="cwall5640",
+            repo="fixture",
+            base_branch="dev",
+            title="t",
+            body="b",
+            head_sha="a" * 40,
+            author_id="dev:claude1",
+            reviewer_id="vibe-1",
+            manifest_id="m",
+            branch_prefix="claude1",
+            comment_signature="— dev:claude1",
+        )
+
+
+def test_publisher_deletes_the_askpass_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    secrets = tmp_path / "secrets" / "values"
+    prepare_secret_file(secrets, PUBLISH)
+    api = FixtureApi("a" * 40)
+    url = api.start_url()
+
+    def fake_run(command: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert PINNED_ORIGIN in command
+        assert PUBLISH not in " ".join(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("free_claude_code.assignments.publisher.subprocess.run", fake_run)
+    try:
+        created = publish_feature(
+            enabled=True,
+            secrets_file=secrets,
+            workspace=tmp_path,
+            task_id="fix-add",
+            origin=PINNED_ORIGIN,
+            api_base=url,
+            owner="cwall5640",
+            repo="fixture",
+            base_branch="dev",
+            title="t",
+            body="b",
+            head_sha="a" * 40,
+            author_id="dev:claude1",
+            reviewer_id="vibe-1",
+            manifest_id="m",
+            branch_prefix="claude1",
+            comment_signature="— dev:claude1",
+        )
+    finally:
+        api.stop()
+    assert created.startswith("http://127.0.0.1/pull/")
+    assert not (tmp_path / "secrets" / "askpass-token").exists()
 
 
 def test_windows_owner_check_is_used_for_private_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1014,16 +1209,187 @@ def test_windows_owner_check_is_used_for_private_dirs(tmp_path: Path, monkeypatc
         "free_claude_code.assignments.workflow._platform_name",
         lambda: "nt",
     )
-    calls: list[Path] = []
+    order: list[str] = []
 
-    def deny(path: Path) -> bool:
-        calls.append(path)
+    def harden(path: Path) -> None:
+        order.append("harden")
+
+    def allow(path: Path) -> bool:
+        order.append("check")
+        return True
+
+    monkeypatch.setattr("free_claude_code.assignments.windows_acl.harden_path", harden)
+    monkeypatch.setattr("free_claude_code.assignments.windows_acl.file_is_current_user_only", allow)
+    created = _private_dir(tmp_path / "state")
+    assert created.is_dir()
+    assert order == ["harden", "check"]
+
+
+def test_two_workers_pick_up_only_their_own_lane(tmp_path: Path) -> None:
+    from free_claude_code.assignments.identity import validate_worker_identity
+
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    api.issue_labels = {9: ["waiting:claude1"], 11: ["waiting:claude2"]}
+    first = default_worker_identity()
+    second_key = tmp_path / "claude2.key"
+    secret, _public = new_key()
+    second_key.write_bytes(secret)
+    os.chmod(second_key, 0o600)
+    second = WorkerIdentity(
+        actor_name="dev:claude2",
+        bare_name="claude2",
+        branch_prefix="claude2",
+        comment_signature="— dev:claude2",
+        waiting_label="waiting:claude2",
+        github_login="publisher-bot",
+        verdict_key_file=second_key,
+    )
+    validate_worker_identity(second)
+    try:
+        claude1 = _candidate(tmp_path, api, sha, _script(tmp_path, fail_until=1), name="lane1", identity=first)
+        claude2 = _candidate(
+            tmp_path,
+            api,
+            sha,
+            _script(tmp_path, fail_until=1),
+            name="lane2",
+            identity=second,
+            issue_number=11,
+        )
+        with pytest.raises(Disabled, match="publisher is disabled"):
+            claude1.run_once()
+        with pytest.raises(Disabled, match="publisher is disabled"):
+            claude2.run_once()
+    finally:
+        api.stop()
+    assert _git(tmp_path / "lane1" / "workspace", "branch", "--show-current") == "claude1/fix-add"
+    assert _git(tmp_path / "lane2" / "workspace", "branch", "--show-current") == "claude2/fix-add"
+    assert "claude2/" not in _git(tmp_path / "lane1" / "workspace", "branch")
+    assert "claude1/" not in _git(tmp_path / "lane2" / "workspace", "branch")
+    own = FixtureApi(sha)
+    own.author = "claude2"
+    own.token_login = "publisher-bot"
+    try:
+        review = _candidate(tmp_path, own, sha, _ok_script(tmp_path), name="lane2-review", identity=second)
+        with pytest.raises(Forbidden, match="authored or pushed"):
+            review.review_pull(9)
+        own.author = "publisher-bot"
+        own.pusher = ""
+        with pytest.raises(Forbidden, match="authored or pushed"):
+            review.review_pull(9)
+    finally:
+        own.stop()
+    other = FixtureApi(sha)
+    other.author = "claude1"
+    other.token_login = "publisher-bot"
+    try:
+        review = _candidate(tmp_path, other, sha, _ok_script(tmp_path), name="lane2-other", identity=second)
+        review.verdict_key_file = second_key
+        result = review.review_pull(9)
+        assert result["verdict"] == "PASS"
+        body = _posted_texts(other)[-1]
+        assert body.rstrip().endswith("— dev:claude2")
+        assert "— dev:claude1" not in body
+    finally:
+        other.stop()
+    pushed = FixtureApi(sha)
+    pushed.author = "someone"
+    pushed.pusher = "claude1"
+    pushed.token_login = "claude1"
+    try:
+        review = _candidate(tmp_path, pushed, sha, _ok_script(tmp_path), name="lane1-push", identity=first)
+        with pytest.raises(Forbidden, match="authored or pushed"):
+            review.review_pull(9)
+    finally:
+        pushed.stop()
+
+
+def test_handoff_actor_interim_and_pull_head(tmp_path: Path) -> None:
+    assert actor_label("Minerva") == "waiting:minerva"
+    assert actor_label("Grok") == "waiting:grok"
+    assert actor_label("Casey") == "waiting:casey"
+    assert actor_label("RPG Dev") == "waiting:rpg-dev"
+    assert actor_label("claude3") == "waiting:claude3"
+    with pytest.raises(Forbidden, match="unknown handoff"):
+        actor_label("pm")
+    with pytest.raises(Forbidden, match="unknown handoff"):
+        assert_handoff_label("waiting:pm")
+    loaded = load_actor_map(Path("packaging/assignment-candidate/handoff-actors.example.json"))
+    assert loaded["Minerva"] == "waiting:minerva"
+    assert "pm" not in loaded
+    example = load_worker_identity(Path("packaging/assignment-candidate/worker.example.json"))
+    assert example.bare_name == "claude1"
+    managers = load_manager_config(Path("packaging/assignment-candidate/managers.example.json"))
+    assert {item.principal_id: item.handoff_actor for item in managers}["minerva"] == "Minerva"
+    assert {item.principal_id: item.handoff_actor for item in managers}["project-manager"] == "Grok"
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    before = int(datetime(2026, 11, 11, 15, tzinfo=timezone.utc).timestamp())
+    after = int(datetime(2026, 11, 12, tzinfo=timezone.utc).timestamp())
+    valid = _verifier(tmp_path / "before", now=before, interim="2026-11-11")
+    _check(valid, _attestation(sha, nonce="during", expires=2_000_000_000))
+    expired = _verifier(tmp_path / "after", now=after, interim="2026-11-11")
+    with pytest.raises(ApprovalInvalid, match="interim_until"):
+        _check(expired, _attestation(sha, nonce="later", expires=2_000_000_000))
+    api = FixtureApi(sha)
+    api.labels = []
+    api.has_pull = True
+    api.pr_sha = "b" * 40
+    api.pr_sha_next = "b" * 40
+    api.comments = [{"body": _signed_next(VIBE_SECRET, "b" * 40)}]
+    try:
+        matched = _candidate(tmp_path, api, sha, _script(tmp_path, fail_until=1), name="pr-head")
+        with pytest.raises(Disabled, match="publisher is disabled"):
+            matched.run_once()
+    finally:
+        api.stop()
+    assert (tmp_path / "pr-head" / "workspace").is_dir()
+    api = FixtureApi(sha)
+    api.labels = []
+    api.pr_sha = "b" * 40
+    api.pr_sha_next = "b" * 40
+    api.comments = [{"body": _signed_next(VIBE_SECRET, sha)}]
+    try:
+        stale = _candidate(tmp_path, api, sha, _script(tmp_path, fail_until=1), name="pr-base")
+        assert stale.run_once()["status"] == "stale_head"
+    finally:
+        api.stop()
+    assert not (tmp_path / "pr-base" / "workspace").exists()
+    api = FixtureApi(sha)
+    api.labels = []
+    api.has_pull = False
+    api.comments = [{"body": _signed_next(VIBE_SECRET, sha)}]
+    try:
+        issue = _candidate(tmp_path, api, sha, _script(tmp_path, fail_until=1), name="issue-base")
+        with pytest.raises(Disabled, match="publisher is disabled"):
+            issue.run_once()
+    finally:
+        api.stop()
+
+
+def test_windows_pid_query_does_not_signal(monkeypatch: pytest.MonkeyPatch) -> None:
+    from free_claude_code.assignments.windows_acl import process_is_running
+    from free_claude_code.assignments.workflow import _pid_alive
+
+    assert process_is_running(True, 259) is True
+    assert process_is_running(True, 0) is False
+    assert process_is_running(False, 259) is False
+    seen: list[int] = []
+
+    def query(pid: int) -> bool:
+        seen.append(pid)
         return False
 
-    monkeypatch.setattr("free_claude_code.assignments.windows_acl.file_is_current_user_only", deny)
-    with pytest.raises(Forbidden, match="current user"):
-        _private_dir(tmp_path / "state")
-    assert calls
+    def explode(*_args: object) -> None:
+        raise AssertionError("os.kill must not be used to probe a Windows process")
+
+    monkeypatch.setattr("free_claude_code.assignments.workflow._platform_name", lambda: "nt")
+    monkeypatch.setattr("free_claude_code.assignments.windows_acl.windows_pid_alive", query)
+    monkeypatch.setattr(os, "kill", explode)
+    assert _pid_alive(4242) is False
+    assert seen == [4242]
 
 
 def test_startup_install_is_disabled_and_package_is_real() -> None:
@@ -1033,6 +1399,7 @@ def test_startup_install_is_disabled_and_package_is_real() -> None:
     assert CAPABILITY_BOUNDARY["manager_signatures"] == "ed25519_public_key_only"
     assert CAPABILITY_BOUNDARY["text_signature"] == "convention_only_not_authority"
     assert CAPABILITY_BOUNDARY["manager_set"] == "config_file_of_pinned_public_keys"
+    assert CAPABILITY_BOUNDARY["manager_attestation"] == "one_signature_covers_execute_and_publish"
     root = Path("packaging/assignment-candidate")
     script = (root / "windows" / "Invoke-AssignmentCandidate.ps1").read_text(encoding="utf-8")
     assert "\r" not in script

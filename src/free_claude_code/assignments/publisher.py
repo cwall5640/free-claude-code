@@ -8,6 +8,7 @@ environments never import this module's token.
 
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -19,16 +20,35 @@ from free_claude_code.assignments.github_http import GitHubHttpClient
 from free_claude_code.assignments.models import PublicationPlan
 from free_claude_code.assignments.secrets import load_secret_file, refuse_symlink_or_reparse
 
-ACTOR_BRANCH_PREFIX = "claude1/"
+_PREFIX = re.compile(r"claude[1-9][0-9]*\Z")
 
 
-def feature_branch(task_id: str) -> str:
+def pinned_origin(owner: str, repo: str) -> str:
+    if not owner or not repo or "/" in owner or "/" in repo or owner.startswith("-") or repo.startswith("-"):
+        raise Forbidden("publisher repository is not configured")
+    return f"https://github.com/{owner}/{repo}.git"
+
+
+def assert_pinned_origin(origin: str, owner: str, repo: str) -> str:
+    """The only push URL is https://github.com/<owner>/<repo> from config."""
+
+    pinned = pinned_origin(owner, repo)
+    allowed = {pinned, pinned.removesuffix(".git")}
+    if origin.rstrip("/") not in allowed:
+        raise Forbidden("publisher origin must be https://github.com/<owner>/<repo>")
+    return pinned
+
+
+def feature_branch(task_id: str, branch_prefix: str) -> str:
+    prefix = branch_prefix.strip().strip("/")
+    if not _PREFIX.fullmatch(prefix):
+        raise Forbidden("branch prefix must be the worker bare name")
     lowered = task_id.strip().lower()
     if not lowered or lowered != task_id.lower() or "/" in lowered or lowered.startswith("-"):
         raise Forbidden("task id must be a lowercase slug")
     if lowered in {"main", "master"}:
         raise MergeRejected("refusing a protected branch")
-    return f"{ACTOR_BRANCH_PREFIX}{lowered}"
+    return f"{prefix}/{lowered}"
 
 
 def refuse_push_ref(ref: str, *, force: bool = False, tags: bool = False) -> None:
@@ -58,72 +78,86 @@ def publish_feature(
     author_id: str,
     reviewer_id: str,
     manifest_id: str,
+    branch_prefix: str,
+    comment_signature: str,
     timeout: float = 10.0,
     force: bool = False,
     tags: bool = False,
     ca_file: Path | None = None,
 ) -> str:
-    """Push one feature branch and open a pull request. Merge is not available."""
+    """Push one feature branch and open a pull request. Merge is not available.
+
+    One manager attestation is recorded by the caller as both the execute and
+    publish approval. This process does not mint a second signature.
+    """
 
     if not enabled:
         raise Disabled("publisher is disabled")
-    branch = feature_branch(task_id)
+    branch = feature_branch(task_id, branch_prefix)
     refuse_push_ref(f"refs/heads/{branch}", force=force, tags=tags)
-    if not origin.startswith("https://"):
-        raise Forbidden("publisher origin must be one configured https url")
+    pinned = assert_pinned_origin(origin, owner, repo)
+    if not comment_signature.startswith("— "):
+        raise Forbidden("comment signature must name the worker")
     token = load_secret_file(secrets_file).get("github_publish")
-    askpass = _askpass_helper(secrets_file.parent)
-    env = scrub_env(os.environ)
-    env.update(
-        {
-            "GIT_ASKPASS": str(askpass),
-            "GIT_TERMINAL_PROMPT": "0",
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "FCC_ASKPASS_FILE": str(_token_file(secrets_file.parent, token)),
-        }
-    )
-    if ca_file is not None:
-        env["GIT_SSL_CAINFO"] = str(ca_file)
-    if token in " ".join(env.get("GIT_ASKPASS", "")):
-        raise Forbidden("publish token must not be placed on argv")
-    command = (
-        "git",
-        "-c",
-        "credential.helper=",
-        "-c",
-        "http.sslVerify=true",
-        "push",
-        origin,
-        f"HEAD:refs/heads/{branch}",
-    )
-    if any(part in {"--force", "--force-with-lease", "-f"} for part in command):
-        raise MergeRejected("force pushes and tags are refused")
-    if token in origin or token in " ".join(command):
-        raise Forbidden("publish token must not be placed on argv")
-    completed = subprocess.run(
-        command,
-        cwd=workspace,
-        env=env,
-        shell=False,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        raise Forbidden("feature push failed")
-    plan = PublicationPlan(
-        manifest_id=manifest_id,
-        base_branch=base_branch,
-        head_branch=branch,
-        title=title,
-        body=body + f"\nResolved head: {head_sha}\n— dev:claude1\n",
-        patch_sha256=head_sha,
-        reviewer_id=reviewer_id,
-        author_id=author_id,
-    )
-    client = GitHubHttpClient(api_base, token, timeout=timeout)
-    return client.create_pull_request_for(owner, repo, plan, timeout=timeout)
+    token_path = _token_file(secrets_file.parent, token)
+    try:
+        askpass = _askpass_helper(secrets_file.parent)
+        env = scrub_env(os.environ)
+        env.update(
+            {
+                "GIT_ASKPASS": str(askpass),
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "FCC_ASKPASS_FILE": str(token_path),
+            }
+        )
+        if ca_file is not None:
+            env["GIT_SSL_CAINFO"] = str(ca_file)
+        if token in " ".join(env.get("GIT_ASKPASS", "")):
+            raise Forbidden("publish token must not be placed on argv")
+        command = (
+            "git",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "http.sslVerify=true",
+            "push",
+            pinned,
+            f"HEAD:refs/heads/{branch}",
+        )
+        if any(part in {"--force", "--force-with-lease", "-f"} for part in command):
+            raise MergeRejected("force pushes and tags are refused")
+        if token in pinned or token in " ".join(command):
+            raise Forbidden("publish token must not be placed on argv")
+        completed = subprocess.run(
+            command,
+            cwd=workspace,
+            env=env,
+            shell=False,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise Forbidden("feature push failed")
+        plan = PublicationPlan(
+            manifest_id=manifest_id,
+            base_branch=base_branch,
+            head_branch=branch,
+            title=title,
+            body=body + f"\nResolved head: {head_sha}\n{comment_signature}\n",
+            patch_sha256=head_sha,
+            reviewer_id=reviewer_id,
+            author_id=author_id,
+        )
+        client = GitHubHttpClient(api_base, token, timeout=timeout)
+        return client.create_pull_request_for(owner, repo, plan, timeout=timeout)
+    finally:
+        try:
+            os.unlink(token_path)
+        except OSError:
+            pass
 
 
 def _token_file(directory: Path, token: str) -> Path:
@@ -183,6 +217,8 @@ def main(argv: list[str] | None = None) -> int:
             author_id=str(raw["author_id"]),
             reviewer_id=str(raw["reviewer_id"]),
             manifest_id=str(raw["manifest_id"]),
+            branch_prefix=str(raw["branch_prefix"]),
+            comment_signature=str(raw["comment_signature"]),
             ca_file=Path(raw["ca_file"]) if raw.get("ca_file") else None,
             force=bool(raw.get("force", False)),
             tags=bool(raw.get("tags", False)),

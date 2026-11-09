@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Separate process that signs one claude1 verdict.
+"""Separate process that signs one worker verdict.
 
 It builds the verdict payload itself. It has no manager-attestation type and
 cannot mint an assignment. The private key is read from a file, not from argv.
@@ -32,6 +32,7 @@ def main(argv: list[str] | None = None) -> int:
         signature = sign_verdict_file(
             Path(str(raw["private_key_file"])),
             {
+                "actor": str(raw["actor"]),
                 "findings": str(raw.get("findings", "")),
                 "head_sha": str(raw["head_sha"]),
                 "limitations": str(raw.get("limitations", "")),

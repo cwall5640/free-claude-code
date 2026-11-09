@@ -349,6 +349,44 @@ def _inspect(path: Path, *, directory: bool) -> tuple[bool, str]:
         kernel32.CloseHandle(handle)
 
 
+STILL_ACTIVE = 259
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+def process_is_running(opened: bool, exit_code: int | None) -> bool:
+    """True only when the process handle is open and Windows still reports active.
+
+    ``os.kill(pid, 0)`` terminates a process on Windows. Callers must use
+    ``OpenProcess`` and ``GetExitCodeProcess`` instead.
+    """
+
+    return bool(opened and exit_code == STILL_ACTIVE)
+
+
+def windows_pid_alive(pid: int) -> bool:
+    """Query a PID. This does not signal the process."""
+
+    if pid <= 0:
+        return False
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return process_is_running(False, None)
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return process_is_running(True, None)
+        return process_is_running(True, int(code.value))
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def harden_path(path: Path) -> None:
     sid, owned = _sid_pointer(current_user_sid())
     try:

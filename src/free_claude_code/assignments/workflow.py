@@ -4,8 +4,9 @@
 The live loop is off until a later approval. When a test or a future operator
 turns `enabled` on, pickup uses GitHubHttpClient, AssignmentService, a local
 git workspace, the command sandbox, and a separate publisher process.
-`waiting:claude1` only routes. A manager Ed25519 signature authorizes.
-This module verifies manager keys and cannot mint them.
+The configured waiting label only routes. A manager Ed25519 signature
+authorizes both execute and publish. This module verifies manager keys and
+cannot mint them. Each install loads its own worker identity.
 """
 
 import hashlib
@@ -16,6 +17,7 @@ import stat
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,6 +25,8 @@ from pathlib import Path
 from typing import Iterator
 
 from free_claude_code.assignments.ed25519_verify import verify_ed25519
+from free_claude_code.assignments.handoff import actor_label, assert_handoff_label
+from free_claude_code.assignments.identity import WorkerIdentity, default_worker_identity
 from free_claude_code.assignments.errors import (
     ApprovalInvalid,
     Conflict,
@@ -45,10 +49,11 @@ from free_claude_code.assignments.secrets import (
 )
 from free_claude_code.assignments.service import AssignmentService
 
-ACTOR_NAME = "dev:claude1"
-ACTOR_BARE = "claude1"
-DEFAULT_WAITING_LABEL = "waiting:claude1"
-COMMENT_SUFFIX = "\n— dev:claude1\n"
+_DEFAULT_WORKER = default_worker_identity()
+ACTOR_NAME = _DEFAULT_WORKER.actor_name
+ACTOR_BARE = _DEFAULT_WORKER.bare_name
+DEFAULT_WAITING_LABEL = _DEFAULT_WORKER.waiting_label
+COMMENT_SUFFIX = _DEFAULT_WORKER.comment_suffix()
 REPAIR_LIMIT = 2
 HOSTED_RUNNER_LABELS = frozenset(
     {"ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04", "windows-latest", "macos-latest"}
@@ -74,6 +79,9 @@ CAPABILITY_BOUNDARY = {
     "activation": "disabled",
     "network_git_push": "disabled_until_publisher_enabled_one_https_origin",
     "manager_set": "config_file_of_pinned_public_keys",
+    "manager_attestation": "one_signature_covers_execute_and_publish",
+    "worker_identity": "per_install_config",
+    "handoff_actors": "briefing_set_plus_claudeN_manager_map_is_config",
     "issue_creation": "unsupported_http_403_no_alternate_principal",
     "merge": "refused",
     "hosted_or_paid_ci": "refused",
@@ -145,12 +153,14 @@ class ManagerVerifier:
         revocations: set[str] | None = None,
         github_logins: Mapping[str, str] | None = None,
         interim_until: Mapping[str, str] | None = None,
+        handoff_actors: Mapping[str, str] | None = None,
     ) -> None:
         self._keys = dict(keys)
         self._roles = dict(roles)
         self._display_names = dict(display_names)
         self._github_logins = dict(github_logins or {})
         self._interim_until = dict(interim_until or {})
+        self._handoff_actors = dict(handoff_actors or {})
         self.audience = audience
         self.now = now
         self.state_dir = state_dir
@@ -180,6 +190,8 @@ class ManagerVerifier:
             raise Forbidden("attestation audience does not match this worker")
         if attestation.decision not in {"assign", "cancel"}:
             raise Forbidden("unknown manager decision")
+        if _interim_expired(self.interim_until(attestation.principal_id), self.now):
+            raise ApprovalInvalid("manager key is past interim_until")
         if self.now > attestation.expires_at:
             raise ApprovalInvalid("manager attestation expired")
         if attestation.nonce in self.revocations or attestation.nonce in _read_lines(self._revocation_path()):
@@ -229,6 +241,14 @@ class ManagerVerifier:
 
     def public_keys(self) -> tuple[bytes, ...]:
         return tuple(self._keys.values())
+
+    def handoff_for(self, principal_id: str) -> tuple[str, str]:
+        actor = self._handoff_actors.get(principal_id, "")
+        if not actor:
+            raise Forbidden("signing manager has no handoff actor")
+        label = actor_label(actor)
+        assert_handoff_label(label)
+        return actor, label
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,19 +501,20 @@ class ClaimLedger:
 
 
 def assert_routing_label(label: str) -> None:
-    if label.startswith("dev:") or label.startswith("status:") or label == "dev:claude1":
+    if label.startswith("dev:") or label.startswith("status:"):
         raise Forbidden("refusing to search or create a dev or status label")
     if not label.startswith("waiting:"):
         raise Forbidden("routing label must be a waiting label")
 
 
 def start_from_label() -> None:
-    raise Forbidden(f"label {DEFAULT_WAITING_LABEL} is not execution authority")
+    raise Forbidden("a waiting label is not execution authority")
 
 
-def assert_independent_reviewer(*, author_login: str, pusher_login: str = "") -> None:
-    actors = {ACTOR_BARE, ACTOR_NAME}
-    if author_login in actors or pusher_login in actors:
+def assert_independent_reviewer(
+    *, author_login: str, pusher_login: str = "", logins: frozenset[str]
+) -> None:
+    if author_login in logins or pusher_login in logins:
         raise Forbidden("refusing to review a pull request this actor authored or pushed")
 
 
@@ -506,7 +527,7 @@ def _comment_payload(body: str) -> bytes:
     lines = [
         line
         for line in body.splitlines()
-        if not line.startswith("SIGNATURE:") and line.strip() != "— dev:claude1"
+        if not line.startswith("SIGNATURE:") and not line.strip().startswith("— ")
     ]
     return "\n".join(lines).strip().encode("utf-8")
 
@@ -642,6 +663,7 @@ class AssignmentCandidate:
         command_cwd: str,
         repair_limit: int = REPAIR_LIMIT,
         awake_seconds: float = 30.0,
+        identity: WorkerIdentity | None = None,
     ) -> None:
         self.enabled = enabled
         self.owner = owner
@@ -664,12 +686,12 @@ class AssignmentCandidate:
         self.model_grant_factory = None
         self.grant_key = ""
         self.now = 0
-        self.waiting_label = DEFAULT_WAITING_LABEL
-        self.next_actor = "pm"
+        self.identity = identity or default_worker_identity()
+        self.waiting_label = self.identity.waiting_label
         self.publish_enabled = False
         self.publish_origin = ""
         self.publish_ca_file = None
-        self.verdict_key_file: Path | None = None
+        self.verdict_key_file = self.identity.verdict_key_file
 
     def create_issue(self) -> None:
         self.issues.create_issue()
@@ -706,7 +728,7 @@ class AssignmentCandidate:
         base_sha = self.api.fetch_branch_sha(
             self.owner, self.repo, attestation.base_branch, timeout=self.api.timeout
         )
-        route = self._route(number, labels, base_sha)
+        route = self._route(number, labels, self._route_sha(number, base_sha))
         if route == "absent":
             return {"status": "not_routed", "merged": False}
         if route == "stale":
@@ -742,6 +764,8 @@ class AssignmentCandidate:
         manifest = service.fetch(self.owner, self.repo, number, reader=self.api)
         if manifest.base_sha != base_sha:
             raise ApprovalInvalid("fetched base SHA does not match the attestation")
+        # One verified manager attestation covers both phases. The two records
+        # share that principal. This module does not mint a second signature.
         service.approve(manifest, phase="execute", operator_id=attestation.principal_id, reader=self.api)
         service.approve(manifest, phase="publish", operator_id=attestation.principal_id, reader=self.api)
         workspace = GitWorkspace(self.paths.workspace)
@@ -750,9 +774,9 @@ class AssignmentCandidate:
         landed = workspace.materialize(
             self.paths.source_repo,
             base_sha,
-            f"claude1/{attestation.task_id.lower()}",
+            self.identity.feature_branch(attestation.task_id),
         )
-        if landed != base_sha or workspace.branch_name() != f"claude1/{attestation.task_id.lower()}":
+        if landed != base_sha or workspace.branch_name() != self.identity.feature_branch(attestation.task_id):
             raise Forbidden("branch is not bound to the approved base")
         repairs = int(claim.get("repairs", 0))
         logs: list[dict[str, object]] = []
@@ -804,7 +828,7 @@ class AssignmentCandidate:
         head = workspace.head()
         if head != workspace.head() or not workspace.ancestry_contains(base_sha, head):
             raise Forbidden("resolved HEAD is not based on the approved SHA")
-        if workspace.branch_name() != f"claude1/{attestation.task_id.lower()}":
+        if workspace.branch_name() != self.identity.feature_branch(attestation.task_id):
             raise Forbidden("HEAD is not the feature branch")
         if not self.publish_enabled:
             raise Disabled("publisher is disabled")
@@ -880,6 +904,24 @@ class AssignmentCandidate:
         if any(name in child_env for name in PUBLISHER_ENV):
             raise Forbidden("publisher credential reached a child environment")
 
+    def _publisher_login(self) -> str:
+        token = load_secret_file(self.paths.secrets_file).get("github_publish")
+        client = GitHubHttpClient(self.api.base_url, token, timeout=self.api.timeout)
+        return client.fetch_authenticated_login(timeout=self.api.timeout)
+
+    def _route_sha(self, number: int, base_sha: str) -> str:
+        """PR handoffs bind to the pull head. Issue tasks keep the base SHA."""
+
+        try:
+            pull = self.api.fetch_pull(self.owner, self.repo, number, timeout=self.api.timeout)
+        except Forbidden as exc:
+            if "404" in str(exc):
+                return base_sha
+            raise
+        head = pull.get("head") if isinstance(pull.get("head"), dict) else {}
+        sha = str(head.get("sha", "")) if isinstance(head, dict) else ""
+        return sha or base_sha
+
     def _inbox_issue_numbers(self) -> tuple[int, ...]:
         inbox = self.paths.inbox
         if not inbox.is_dir():
@@ -897,7 +939,7 @@ class AssignmentCandidate:
         stale = False
         for comment in self.api.list_issue_comments(self.owner, self.repo, number, timeout=self.api.timeout):
             body = str(comment.get("body", ""))
-            if not any(line.strip() == f"NEXT: {ACTOR_BARE}" for line in body.splitlines()):
+            if not any(line.strip() == f"NEXT: {self.identity.bare_name}" for line in body.splitlines()):
                 continue
             signature = _signature_from_comment(body)
             if signature is None:
@@ -934,7 +976,9 @@ class AssignmentCandidate:
             "title": f"Review assignment #{number}",
             "body": f"Resolved head: {head}\n",
             "head_sha": head,
-            "author_id": ACTOR_NAME,
+            "author_id": self.identity.actor_name,
+            "branch_prefix": self.identity.branch_prefix,
+            "comment_signature": self.identity.comment_signature,
             "reviewer_id": attestation.principal_id,
             "manifest_id": manifest_id,
         }
@@ -968,25 +1012,26 @@ class AssignmentCandidate:
         name = self.verifier.display_name(attestation.principal_id)
         interim = self.verifier.interim_until(attestation.principal_id)
         interim_line = f"INTERIM UNTIL: {interim}\n" if interim else ""
+        actor, label = self.verifier.handoff_for(attestation.principal_id)
         self.api.replace_waiting_label(
             self.owner,
             self.repo,
             number,
             remove=self.waiting_label,
-            add=f"waiting:{self.next_actor}",
+            add=label,
             timeout=self.api.timeout,
         )
         handoff = (
             f"PR: {url}\nHEAD: {head}\n"
             f"SIGNED BY: {attestation.principal_id} ({name})\n"
             f"{interim_line}"
-            f"NEXT: {self.next_actor}\n"
+            f"NEXT: {actor}\n"
             "ACTION: independent review\nLIMITATIONS: local runners only\n"
-            f"{COMMENT_SUFFIX}"
+            f"{self.identity.comment_suffix()}"
         )
         self.api.post_issue_comment(self.owner, self.repo, number, handoff, timeout=self.api.timeout)
         task_id = attestation.task_id.lower()
-        return f"HANDOFF: {task_id} | {url} | {head} | {verdict} | NEXT: {self.next_actor}"
+        return f"HANDOFF: {task_id} | {url} | {head} | {verdict} | NEXT: {actor}"
 
     def review_pull(self, number: int) -> dict[str, object]:
         """Read-only review. A PASS is a signed comment, never a merge approval."""
@@ -998,8 +1043,12 @@ class AssignmentCandidate:
         head = pull.get("head") if isinstance(pull.get("head"), dict) else {}
         live = str(head.get("sha", "")) if isinstance(head, dict) else ""
         pusher = _login(head.get("user")) if isinstance(head, dict) else ""
-        assert_independent_reviewer(author_login=author, pusher_login=pusher)
-        assert_reviewer_is_not_author(author_login=author, reviewer_login=ACTOR_BARE)
+        logins = set(self.identity.own_logins())
+        logins.add(self._publisher_login())
+        assert_independent_reviewer(
+            author_login=author, pusher_login=pusher, logins=frozenset(logins)
+        )
+        assert_reviewer_is_not_author(author_login=author, reviewer_login=self.identity.bare_name)
         if not live:
             raise Forbidden("pull request has no head")
         checkout = self.paths.state_dir / "review-checkout"
@@ -1018,7 +1067,7 @@ class AssignmentCandidate:
             manifest = _review_manifest(live)
             sandbox = Sandbox(checkout / self.command_cwd, allowed=(self.allowed_command,), timeout_seconds=10)
             evidence = sandbox.run(
-                NativeCommandApproval(manifest.manifest_id, self.allowed_command, ACTOR_NAME),
+                NativeCommandApproval(manifest.manifest_id, self.allowed_command, self.identity.actor_name),
                 manifest=manifest,
                 head_sha=live,
                 env=scrub_env(os.environ),
@@ -1031,7 +1080,7 @@ class AssignmentCandidate:
             f"VERDICT: {verdict}\nHEAD: {live}\nFINDINGS: {findings}\n"
             "LIMITATIONS: local runners only\n"
             f"SIGNATURE: {signature}\n"
-            f"{COMMENT_SUFFIX}"
+            f"{self.identity.comment_suffix()}"
         )
         self.api.post_issue_comment(self.owner, self.repo, number, body, timeout=self.api.timeout)
         return {"status": "stale" if verdict == "STALE" else "reviewed", "verdict": verdict, "head_sha": live, "merged": False}
@@ -1043,6 +1092,7 @@ class AssignmentCandidate:
         _atomic_json(
             config_path,
             {
+                "actor": self.identity.actor_name,
                 "findings": findings,
                 "head_sha": head_sha,
                 "limitations": "local runners only",
@@ -1186,8 +1236,9 @@ def _private_dir(path: Path) -> Path:
     refuse_symlink_or_reparse(is_symlink=path.is_symlink(), reparse=False)
     path.mkdir(parents=True, exist_ok=True)
     if _platform_name() == "nt":
-        from free_claude_code.assignments.windows_acl import file_is_current_user_only
+        from free_claude_code.assignments.windows_acl import file_is_current_user_only, harden_path
 
+        harden_path(path)
         if not file_is_current_user_only(path):
             raise Forbidden("state directory is not owned by the current user")
         return path
@@ -1198,9 +1249,26 @@ def _private_dir(path: Path) -> Path:
     return path
 
 
+def _interim_expired(until: str, now: int) -> bool:
+    """True after the UTC calendar day named by YYYY-MM-DD. That day is still valid."""
+
+    if not until:
+        return False
+    try:
+        year, month, day = (int(part) for part in until.split("-"))
+        deadline = datetime(year, month, day, tzinfo=timezone.utc) + timedelta(days=1)
+    except ValueError as exc:
+        raise ApprovalInvalid("interim_until is not a calendar date") from exc
+    return datetime.fromtimestamp(now, tz=timezone.utc) >= deadline
+
+
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if _platform_name() == "nt":
+        from free_claude_code.assignments.windows_acl import windows_pid_alive
+
+        return windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

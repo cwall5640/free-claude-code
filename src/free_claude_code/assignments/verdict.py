@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Verify a claude1 verdict. This module cannot sign one."""
+"""Verify one worker verdict. This module cannot sign one."""
 
 import json
 from collections.abc import Mapping
@@ -14,10 +14,11 @@ def verdict_payload(fields: Mapping[str, str]) -> bytes:
 
     verdict = fields.get("verdict", "")
     head_sha = fields.get("head_sha", "")
-    if verdict not in _VERDICTS or not head_sha:
+    actor = fields.get("actor", "")
+    if verdict not in _VERDICTS or not head_sha or not actor:
         return b""
     body = {
-        "actor": "dev:claude1",
+        "actor": actor,
         "findings": fields.get("findings", ""),
         "head_sha": head_sha,
         "limitations": fields.get("limitations", ""),

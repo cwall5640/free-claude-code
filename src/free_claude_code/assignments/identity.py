@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+"""Per-install worker identity. claude1 is only the default example.
+
+A second laptop uses another file. The worker modules that verify manager
+keys do not read the verdict private key; they pass its path to the signer.
+"""
+
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+from free_claude_code.assignments.errors import Forbidden
+
+_BARE = re.compile(r"claude[1-9][0-9]*\Z")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerIdentity:
+    actor_name: str
+    bare_name: str
+    branch_prefix: str
+    comment_signature: str
+    waiting_label: str
+    github_login: str
+    verdict_key_file: Path | None = None
+
+    def comment_suffix(self) -> str:
+        return f"\n{self.comment_signature}\n"
+
+    def feature_branch(self, task_id: str) -> str:
+        lowered = task_id.strip().lower()
+        return f"{self.branch_prefix}/{lowered}"
+
+    def own_logins(self) -> frozenset[str]:
+        return frozenset({self.actor_name, self.bare_name, self.github_login})
+
+
+def default_worker_identity() -> WorkerIdentity:
+    """Example install. Replace the file to run claude2 or another worker."""
+
+    return WorkerIdentity(
+        actor_name="dev:claude1",
+        bare_name="claude1",
+        branch_prefix="claude1",
+        comment_signature="— dev:claude1",
+        waiting_label="waiting:claude1",
+        github_login="claude1",
+    )
+
+
+def load_worker_identity(path: Path) -> WorkerIdentity:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise Forbidden("worker identity config must be an object")
+    key_text = str(raw.get("verdict_key_file", "")).strip()
+    key_path = None
+    if key_text:
+        candidate = Path(key_text)
+        key_path = candidate if candidate.is_absolute() else path.parent / candidate
+    identity = WorkerIdentity(
+        actor_name=str(raw.get("actor_name", "")).strip(),
+        bare_name=str(raw.get("bare_name", "")).strip(),
+        branch_prefix=str(raw.get("branch_prefix", "")).strip().strip("/"),
+        comment_signature=str(raw.get("comment_signature", "")).strip(),
+        waiting_label=str(raw.get("waiting_label", "")).strip(),
+        github_login=str(raw.get("github_login", "")).strip(),
+        verdict_key_file=key_path,
+    )
+    validate_worker_identity(identity)
+    return identity
+
+
+def validate_worker_identity(identity: WorkerIdentity) -> None:
+    if not _BARE.fullmatch(identity.bare_name):
+        raise Forbidden("worker bare name must be claudeN")
+    if identity.actor_name != f"dev:{identity.bare_name}":
+        raise Forbidden("actor name must be dev: plus the bare name")
+    if identity.branch_prefix != identity.bare_name:
+        raise Forbidden("branch prefix must be the bare name")
+    if identity.waiting_label != f"waiting:{identity.bare_name}":
+        raise Forbidden("waiting label must match the bare name")
+    if identity.comment_signature != f"— {identity.actor_name}":
+        raise Forbidden("comment signature must name this actor")
+    if not identity.github_login:
+        raise Forbidden("worker github login is required")

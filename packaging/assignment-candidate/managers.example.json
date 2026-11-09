@@ -5,6 +5,7 @@
       "role": "vibe",
       "display_name": "Vibe Coder",
       "github_login": "VibeCoder",
+      "handoff_actor": "Casey",
       "public_key_hex": "4eeadb73fffc5661c7764a027370b9ae8047060d7c01e0cd17059733b20f0a67"
     },
     {
@@ -12,6 +13,7 @@
       "role": "project_manager",
       "display_name": "Project Manager",
       "github_login": "Grok",
+      "handoff_actor": "Grok",
       "public_key_hex": "70230959ed99d62d70f7fe86ba3fe8166374cc6983fa28de35d20f25d4df4a35"
     },
     {
@@ -19,6 +21,7 @@
       "role": "project_manager",
       "display_name": "Minerva",
       "github_login": "Minerva",
+      "handoff_actor": "Minerva",
       "public_key_hex": "f6ff90db60578dba28e644abd3740e5a0ecda74faf9defce2890fe65357404f9",
       "interim_until": "2026-11-11",
       "interim_note": "Interim PM while the Project Manager is out of tokens. Delete this object to remove the manager. This file is configuration, not a permanent role."

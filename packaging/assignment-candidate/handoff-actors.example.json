@@ -1,0 +1,9 @@
+{
+  "actors": {
+    "Casey": "waiting:casey",
+    "Cody": "waiting:cody",
+    "Minerva": "waiting:minerva",
+    "Grok": "waiting:grok",
+    "RPG Dev": "waiting:rpg-dev"
+  }
+}

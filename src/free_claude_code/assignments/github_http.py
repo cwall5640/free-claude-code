@@ -7,6 +7,7 @@ import urllib.request
 from urllib.parse import quote, urlsplit
 
 from free_claude_code.assignments.errors import Forbidden, MergeRejected, TimedOut
+from free_claude_code.assignments.handoff import assert_handoff_label
 from free_claude_code.assignments.models import IssueSnapshot, PublicationPlan
 from free_claude_code.assignments.redact import redact
 
@@ -94,6 +95,13 @@ class GitHubHttpClient:
             raise Forbidden("issue comments were not a list")
         return tuple(item for item in loaded if isinstance(item, dict))
 
+    def fetch_authenticated_login(self, *, timeout: float) -> str:
+        payload = self._json("GET", "/user", timeout=timeout)
+        login = payload.get("login")
+        if not isinstance(login, str) or not login:
+            raise Forbidden("authenticated user response did not include a login")
+        return login
+
     def fetch_pull(self, owner: str, repo: str, number: int, *, timeout: float) -> dict:
         payload = self._json(
             "GET", f"/repos/{_seg(owner)}/{_seg(repo)}/pulls/{number}", timeout=timeout
@@ -107,6 +115,7 @@ class GitHubHttpClient:
             raise Forbidden("refusing to create or search a dev or status label")
         if not add.startswith("waiting:"):
             raise Forbidden("the next holder label must be a waiting label")
+        assert_handoff_label(add)
         self._bytes(
             "DELETE",
             f"/repos/{_seg(owner)}/{_seg(repo)}/issues/{number}/labels/{quote(remove, safe='')}",
@@ -232,8 +241,12 @@ class GitHubHttpClient:
             with self._opener.open(request, timeout=timeout) as response:
                 return response.read()
         except urllib.error.HTTPError as exc:
-            detail = redact(exc.read().decode("utf-8", errors="replace")[:500])
-            raise Forbidden(f"github http {exc.code}: {detail}") from None
+            try:
+                detail = redact(exc.read().decode("utf-8", errors="replace")[:500])
+                code = exc.code
+            finally:
+                exc.close()
+            raise Forbidden(f"github http {code}: {detail}") from None
         except TimeoutError as exc:
             raise TimedOut("github http timed out") from exc
         except urllib.error.URLError as exc:

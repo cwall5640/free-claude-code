@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from free_claude_code.assignments.errors import Forbidden
+from free_claude_code.assignments.handoff import actor_label
 
 _ROLES = frozenset({"vibe", "project_manager"})
 
@@ -22,6 +23,7 @@ class ManagerIdentity:
     public_key: bytes
     github_login: str
     interim_until: str = ""
+    handoff_actor: str = ""
 
 
 def load_manager_config(path: Path) -> tuple[ManagerIdentity, ...]:
@@ -41,7 +43,10 @@ def load_manager_config(path: Path) -> tuple[ManagerIdentity, ...]:
         display_name = str(item.get("display_name", "")).strip()
         github_login = str(item.get("github_login", "")).strip()
         interim_until = str(item.get("interim_until", "")).strip()
+        handoff_actor = str(item.get("handoff_actor", "")).strip()
         key_hex = str(item.get("public_key_hex", "")).strip()
+        if handoff_actor:
+            actor_label(handoff_actor)
         if not principal_id or not display_name or not github_login:
             raise Forbidden("manager config entry is incomplete")
         if principal_id in seen:
@@ -63,6 +68,7 @@ def load_manager_config(path: Path) -> tuple[ManagerIdentity, ...]:
                 public_key=public_key,
                 github_login=github_login,
                 interim_until=interim_until,
+                handoff_actor=handoff_actor,
             )
         )
     return tuple(found)
