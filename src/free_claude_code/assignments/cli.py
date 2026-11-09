@@ -82,7 +82,7 @@ def load_operator_file(path: Path) -> OperatorFile:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="fcc-assignments")
-    parser.add_argument("--config", required=True)
+    parser.add_argument("--config")
     sub = parser.add_subparsers(dest="command", required=True)
     fetch = sub.add_parser("fetch")
     fetch.add_argument("--owner", required=True)
@@ -107,7 +107,17 @@ def main(argv: list[str] | None = None) -> int:
     rerun.add_argument("--job", required=True, type=int)
     publish = sub.add_parser("publish")
     publish.add_argument("--reviewer", required=True)
+    sub.add_parser("show-contract")
+    sub.add_parser("install-startup")
+    sub.add_parser("activate")
     args = parser.parse_args(argv)
+    if args.command in {"show-contract", "install-startup", "activate"}:
+        from free_claude_code.assignments.workflow import candidate_command
+
+        return candidate_command(args.command)
+    if not args.config:
+        print(json.dumps({"ok": False, "error": "disabled", "detail": "config is required"}))
+        return 2
     try:
         operator = load_operator_file(Path(args.config))
         service = AssignmentService(operator.config, StateStore(operator.state_dir))
