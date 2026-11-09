@@ -651,6 +651,7 @@ class AssignmentCandidate:
         allowed_command: tuple[str, ...],
         command_cwd: str,
         allowed_path_prefixes: tuple[str, ...] = ("src",),
+        command_timeout_seconds: float = 10.0,
         repair_limit: int = REPAIR_LIMIT,
         awake_seconds: float = 30.0,
         identity: WorkerIdentity | None = None,
@@ -666,6 +667,7 @@ class AssignmentCandidate:
         self.allowed_command = allowed_command
         self.command_cwd = command_cwd
         self.allowed_path_prefixes = tuple(allowed_path_prefixes)
+        self.command_timeout_seconds = float(command_timeout_seconds)
         self.repair_limit = repair_limit
         self.awake_seconds = awake_seconds
         self.issues = IssueCreation()
@@ -780,7 +782,7 @@ class AssignmentCandidate:
         self._publish_token = publish_token
         if publish_token in child_env.values() or any(name in child_env for name in PUBLISHER_ENV):
             raise Forbidden("publisher credential reached a child environment")
-        sandbox = Sandbox(command_root, allowed=(self.allowed_command,), timeout_seconds=10)
+        sandbox = Sandbox(command_root, allowed=(self.allowed_command,), timeout_seconds=self.command_timeout_seconds)
         while True:
             self._run_model_if_granted(manifest, child_env)
             try:
@@ -1091,7 +1093,7 @@ class AssignmentCandidate:
         findings = "head moved before the verdict was posted" if verdict == "STALE" else "local checks passed"
         if verdict == "PASS":
             manifest = _review_manifest(live)
-            sandbox = Sandbox(checkout / self.command_cwd, allowed=(self.allowed_command,), timeout_seconds=10)
+            sandbox = Sandbox(checkout / self.command_cwd, allowed=(self.allowed_command,), timeout_seconds=self.command_timeout_seconds)
             evidence = sandbox.run(
                 NativeCommandApproval(manifest.manifest_id, self.allowed_command, self.identity.actor_name),
                 manifest=manifest,

@@ -1,0 +1,40 @@
+name: Assignment timeout verification
+on:
+  push:
+    branches: [minerva/claude1-command-timeout]
+  pull_request:
+    paths:
+      - 'src/free_claude_code/assignments/**'
+      - 'tests/assignments/**'
+      - '.github/workflows/assignment-timeout.yml'
+permissions:
+  contents: read
+jobs:
+  assignments:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        revision: [head, baseline]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.revision == 'baseline' && 'd674f084b45e7fc328ba73927907a7446b107ac6' || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/ci-environment
+        with:
+          runner-label: ubuntu-latest
+      - name: Record tested revision
+        run: git rev-parse HEAD
+      - name: Run assignment suite
+        env:
+          PYTHONPATH: src:.
+        run: uv run --locked pytest tests/assignments/ -n 0 -ra --junitxml=assignment-results.xml
+      - name: Preserve test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: assignments-${{ matrix.revision }}
+          path: assignment-results.xml
+          if-no-files-found: warn
