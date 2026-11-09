@@ -7,6 +7,7 @@ not copied into command environments. Merge is not implemented.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -176,6 +177,26 @@ def scrub_env(source: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in source.items() if key not in _SECRET_ENV}
 
 
+def resolve_program(program: str) -> str:
+    """Find an executable. On Windows, python3 and a shebang name are not enough."""
+
+    if program == sys.executable:
+        return program
+    candidate = Path(program)
+    if candidate.is_file():
+        return str(candidate)
+    name = candidate.name.lower()
+    python_names = {"python", "python3", "python.exe", "python3.exe"}
+    if os.name == "nt" and name in python_names:
+        return sys.executable
+    found = shutil.which(program)
+    if found:
+        return found
+    if name in python_names:
+        return sys.executable
+    return program
+
+
 def parse_unittest(output: str) -> tuple[int, int, int, int]:
     """Best-effort unittest counts. Unparsed output is not a pass."""
 
@@ -302,7 +323,7 @@ class GitWorkspace:
             }
         )
         completed = subprocess.run(
-            ("git", *args),
+            (resolve_program("git"), *args),
             cwd=cwd,
             env=env,
             shell=False,
@@ -359,6 +380,7 @@ class Sandbox:
         token = cancellation or CancellationToken()
         token.raise_if_cancelled()
         argv = vet_command(approval.argv, self.allowed)
+        argv = (resolve_program(argv[0]), *argv[1:])
         env = scrub_env(os.environ if env is None else env)
         started = time.monotonic()
         timed_out = False

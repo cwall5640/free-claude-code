@@ -105,8 +105,10 @@ def write_secret_file(path: Path, values: dict[str, str]) -> None:
 
 def _read_private(path: Path) -> bytes:
     if os.name == "nt":
-        from free_claude_code.assignments.windows_acl import file_is_current_user_only
+        from free_claude_code.assignments.windows_acl import file_is_current_user_only, is_reparse_point
 
+        if is_reparse_point(path) or is_reparse_point(path.parent):
+            refuse_symlink_or_reparse(is_symlink=True, reparse=True)
         if not file_is_current_user_only(path) or not file_is_current_user_only(path.parent):
             raise Forbidden("Windows secret ACL is not limited to the current user")
         return path.read_bytes()

@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 from free_claude_code.assignments.errors import Disabled, Forbidden, MergeRejected
-from free_claude_code.assignments.execution import scrub_env
+from free_claude_code.assignments.execution import resolve_program, scrub_env
 from free_claude_code.assignments.github_http import GitHubHttpClient
 from free_claude_code.assignments.models import PublicationPlan
 from free_claude_code.assignments.secrets import load_secret_file, refuse_symlink_or_reparse
@@ -117,7 +117,7 @@ def publish_feature(
         if token in " ".join(env.get("GIT_ASKPASS", "")):
             raise Forbidden("publish token must not be placed on argv")
         command = (
-            "git",
+            resolve_program("git"),
             "-c",
             "credential.helper=",
             "-c",
@@ -176,9 +176,8 @@ def _token_file(directory: Path, token: str) -> Path:
 
 
 def _askpass_helper(directory: Path) -> Path:
-    path = directory / "askpass.py"
-    path.write_text(
-        "#!/usr/bin/env python3\n"
+    script = directory / "askpass.py"
+    script.write_text(
         "import os\n"
         "import pathlib\n"
         "import sys\n"
@@ -190,8 +189,16 @@ def _askpass_helper(directory: Path) -> Path:
         "    print(token)\n",
         encoding="utf-8",
     )
-    path.chmod(path.stat().st_mode | stat.S_IEXEC)
-    return path
+    if os.name == "nt":
+        launcher = directory / "askpass.cmd"
+        launcher.write_text(
+            f'@echo off\r\n"{sys.executable}" "%~dp0askpass.py" %*\r\n',
+            encoding="utf-8",
+        )
+        return launcher
+    script.write_text("#!/usr/bin/env python3\n" + script.read_text(encoding="utf-8"), encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return script
 
 
 def main(argv: list[str] | None = None) -> int:

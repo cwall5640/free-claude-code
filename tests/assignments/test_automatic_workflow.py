@@ -212,8 +212,10 @@ class FixtureApi(threading.Thread):
         }
 
     def stop(self) -> None:
+        if self.is_alive():
+            self.httpd.shutdown()
+            self.join(timeout=2)
         self.httpd.server_close()
-        self.join(timeout=2)
 
 
 class _SSLServer(ThreadingHTTPServer):
@@ -246,7 +248,7 @@ class GitHttps(threading.Thread):
         key = cert_dir / "key.pem"
         subprocess.run(
             [
-                "openssl",
+                _resolve_tool("openssl"),
                 "req",
                 "-x509",
                 "-newkey",
@@ -268,15 +270,16 @@ class GitHttps(threading.Thread):
             env=env,
         )
         self.bare = root / "repo.git"
-        subprocess.run(["git", "init", "--bare", str(self.bare)], check=True, capture_output=True, env=env)
+        git = _resolve_tool("git")
+        subprocess.run([git, "init", "--bare", str(self.bare)], check=True, capture_output=True, env=env)
         subprocess.run(
-            ["git", "--git-dir", str(self.bare), "config", "http.receivepack", "true"],
+            [git, "--git-dir", str(self.bare), "config", "http.receivepack", "true"],
             check=True,
             capture_output=True,
             env=env,
         )
         expected = "Basic " + base64.b64encode(b"x-access-token:" + token.encode()).decode("ascii")
-        backend = "/usr/lib/git-core/git-http-backend"
+        backend = _resolve_tool("git-http-backend")
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -350,8 +353,40 @@ class GitHttps(threading.Thread):
         return f"https://{host}:{port}/repo.git"
 
     def stop(self) -> None:
+        if self.is_alive():
+            self.httpd.shutdown()
+            self.join(timeout=2)
         self.httpd.server_close()
-        self.join(timeout=2)
+
+
+def _resolve_tool(name: str) -> str:
+    found = shutil.which(name)
+    if found:
+        return found
+    if name == "git-http-backend":
+        for candidate in (
+            Path("/usr/lib/git-core/git-http-backend"),
+            Path("/usr/libexec/git-core/git-http-backend"),
+        ):
+            if candidate.is_file():
+                return str(candidate)
+    if os.name == "nt":
+        program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+        relatives = {
+            "git": ("Git\\cmd\\git.exe", "Git\\bin\\git.exe"),
+            "openssl": ("Git\\usr\\bin\\openssl.exe", "Git\\mingw64\\bin\\openssl.exe"),
+            "git-http-backend": (
+                "Git\\mingw64\\libexec\\git-core\\git-http-backend.exe",
+                "Git\\usr\\libexec\\git-core\\git-http-backend.exe",
+            ),
+        }
+        for relative in relatives.get(name, ()):
+            candidate = Path(program_files) / relative
+            if candidate.is_file():
+                return str(candidate)
+    if name in {"python", "python3"}:
+        return sys.executable
+    return name
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -366,7 +401,9 @@ def _git(cwd: Path, *args: str) -> str:
             "GIT_CONFIG_GLOBAL": os.devnull,
         }
     )
-    completed = subprocess.run(("git", *args), cwd=cwd, env=env, check=True, capture_output=True, text=True)
+    completed = subprocess.run(
+        (_resolve_tool("git"), *args), cwd=cwd, env=env, check=True, capture_output=True, text=True
+    )
     return completed.stdout.strip()
 
 
@@ -574,9 +611,8 @@ def _redirect_pinned_push(git_remote: GitHttps):
     local = git_remote.origin()
     shim_dir = git_remote.root / "shim"
     shim_dir.mkdir(exist_ok=True)
-    shim = shim_dir / "git"
-    shim.write_text(
-        "#!/usr/bin/env python3\n"
+    script = shim_dir / "git-shim.py"
+    script.write_text(
         "import os, sys\n"
         "argv = sys.argv[1:]\n"
         "log = os.environ.get('FCC_GIT_LOG', '')\n"
@@ -587,11 +623,20 @@ def _redirect_pinned_push(git_remote: GitHttps):
         "    if not target:\n"
         "        raise SystemExit(2)\n"
         "    argv = [target if item.startswith('https://github.com/') else item for item in argv]\n"
-        "real = os.environ.get('FCC_REAL_GIT', '/usr/bin/git')\n"
+        "real = os.environ['FCC_REAL_GIT']\n"
         "os.execv(real, [real, *argv])\n",
         encoding="utf-8",
     )
-    shim.chmod(0o755)
+    if os.name == "nt":
+        shim = shim_dir / "git.cmd"
+        shim.write_text(
+            f'@echo off\r\n"{sys.executable}" "%~dp0git-shim.py" %*\r\n',
+            encoding="utf-8",
+        )
+    else:
+        shim = shim_dir / "git"
+        shim.write_text("#!/usr/bin/env python3\n" + script.read_text(encoding="utf-8"), encoding="utf-8")
+        shim.chmod(0o755)
     log = shim_dir / "git.log"
     saved = {
         "PATH": os.environ.get("PATH", ""),
@@ -871,14 +916,17 @@ def test_secret_file_symlink_scrub_and_model_env(tmp_path: Path) -> None:
     loaded = load_secret_file(path)
     assert loaded.get("github_publish") == PUBLISH
     assert "publish" not in repr(loaded)
-    os.chmod(path, 0o644)
-    with pytest.raises(Forbidden):
-        load_secret_file(path)
-    os.chmod(path, 0o600)
-    link = tmp_path / "link"
-    link.symlink_to(path)
-    with pytest.raises(Forbidden):
-        load_secret_file(link)
+    if os.name == "nt":
+        _assert_windows_reparse_secret(tmp_path)
+    else:
+        os.chmod(path, 0o644)
+        with pytest.raises(Forbidden):
+            load_secret_file(path)
+        os.chmod(path, 0o600)
+        link = tmp_path / "link"
+        link.symlink_to(path)
+        with pytest.raises(Forbidden):
+            load_secret_file(link)
     cleaned = scrub_env({"PATH": "/bin", "FCC_PUBLISH_TOKEN": PUBLISH, "FCC_ASKPASS_FILE": "/tmp/token"})
     assert "FCC_PUBLISH_TOKEN" not in cleaned
     assert "FCC_ASKPASS_FILE" not in cleaned
@@ -1369,6 +1417,55 @@ def test_handoff_actor_interim_and_pull_head(tmp_path: Path) -> None:
         api.stop()
 
 
+def _assert_windows_reparse_secret(tmp_path: Path) -> None:
+    """Symlink creation needs SeCreateSymbolicLink. A junction does not."""
+
+    real = tmp_path / "reparse-real"
+    real.mkdir()
+    secret = real / "values"
+    write_secret_file(
+        secret,
+        {
+            "github_read": "read-token",
+            "github_ci": "ci-token",
+            "github_publish": PUBLISH,
+            "grant_key": "grant-key",
+            "proxy_auth": "proxy-token",
+        },
+    )
+    link = tmp_path / "reparse-link"
+    try:
+        link.symlink_to(secret)
+    except OSError as exc:
+        winerror = getattr(exc, "winerror", None)
+        if winerror not in {1314, 5}:
+            raise
+        junction = tmp_path / "reparse-junction"
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction), str(real)],
+            check=True,
+            capture_output=True,
+        )
+        with pytest.raises(Forbidden, match="reparse"):
+            load_secret_file(junction / "values")
+        return
+    with pytest.raises(Forbidden):
+        load_secret_file(link)
+
+
+def test_binary_integrity_key_preserves_every_byte(tmp_path: Path) -> None:
+    from free_claude_code.assignments.workflow import _io_flags
+
+    path = tmp_path / "integrity.key"
+    payload = bytes(range(256))
+    fd = os.open(path, _io_flags(os.O_WRONLY, os.O_CREAT, os.O_EXCL), 0o600)
+    try:
+        os.write(fd, payload)
+    finally:
+        os.close(fd)
+    assert path.read_bytes() == payload
+
+
 def test_windows_pid_query_does_not_signal(monkeypatch: pytest.MonkeyPatch) -> None:
     from free_claude_code.assignments.windows_acl import process_is_running
     from free_claude_code.assignments.workflow import _pid_alive
@@ -1414,16 +1511,78 @@ def test_startup_install_is_disabled_and_package_is_real() -> None:
     assert json.loads(installed.read_text(encoding="utf-8"))["registered_with_os"] is False
 
 
-@pytest.mark.skip(reason="Windows DACL was not executed on this Linux runner; not a security pass")
-def test_windows_dacl_native() -> None:
-    raise AssertionError("native DACL must not be reported as a cloud pass")
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows DACL runs on Windows")
+def test_windows_dacl_native(tmp_path: Path) -> None:
+    from free_claude_code.assignments.windows_acl import file_is_current_user_only
+
+    path = tmp_path / "secrets" / "values"
+    write_secret_file(
+        path,
+        {
+            "github_read": "read-token",
+            "github_ci": "ci-token",
+            "github_publish": PUBLISH,
+            "grant_key": "grant-key",
+            "proxy_auth": "proxy-token",
+        },
+    )
+    assert file_is_current_user_only(path)
+    assert file_is_current_user_only(path.parent)
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    insecure = loose / "values"
+    insecure.write_text("github_read=read-token\n", encoding="utf-8")
+    with pytest.raises(Forbidden):
+        load_secret_file(insecure)
 
 
-@pytest.mark.skip(reason="Windows reparse points were not created; not a security pass")
-def test_windows_reparse_native() -> None:
-    raise AssertionError("native reparse must not be reported as a cloud pass")
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows junctions run on Windows")
+def test_windows_reparse_native(tmp_path: Path) -> None:
+    _assert_windows_reparse_secret(tmp_path)
 
 
-@pytest.mark.skip(reason="Windows PowerShell was not executed on this Linux runner; not a security pass")
-def test_windows_powershell_show_contract() -> None:
-    raise AssertionError("native PowerShell must not be reported as a cloud pass")
+@pytest.mark.skipif(sys.platform != "win32", reason="PowerShell ShowContract runs on Windows")
+def test_windows_powershell_show_contract(tmp_path: Path) -> None:
+    script = Path("packaging/assignment-candidate/windows/Invoke-AssignmentCandidate.ps1")
+    root = tmp_path / "scratch"
+    root.mkdir()
+    missing = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(script),
+            "-Mode",
+            "ShowContract",
+            "-Root",
+            str(root),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert missing.returncode == 2
+    loaded = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(script),
+            "-Mode",
+            "ShowContract",
+            "-Root",
+            str(root),
+            "-Python",
+            sys.executable,
+            "-SourceRoot",
+            str(Path("src").resolve()),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert loaded.returncode == 0
+    assert "activation" in loaded.stdout
+    assert "disabled" in loaded.stdout

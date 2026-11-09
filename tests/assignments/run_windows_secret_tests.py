@@ -8,6 +8,7 @@ result when it is executed on Linux.
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -47,12 +48,34 @@ def attempt_symlink_rejection(link: Path, target: Path) -> str:
         link.symlink_to(target)
     except OSError as exc:
         winerror = getattr(exc, "winerror", None)
+        if os.name == "nt" and winerror in {1314, 5}:
+            return _junction_rejection(target)
         return (
             "UNVERIFIED "
             f"{type(exc).__name__} winerror={winerror} errno={exc.errno}"
         )
     try:
         load_secret_file(link)
+    except Forbidden:
+        return "VALIDATED"
+    return "FAILED_LINK_WAS_READ"
+
+
+def _junction_rejection(secret: Path) -> str:
+    """Exercise the reparse refusal with a junction when symlink creation is denied."""
+
+    junction = secret.parent.parent / "junction-secret"
+    completed = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(secret.parent)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        return f"UNVERIFIED junction {detail}"
+    try:
+        load_secret_file(junction / secret.name)
     except Forbidden:
         return "VALIDATED"
     return "FAILED_LINK_WAS_READ"

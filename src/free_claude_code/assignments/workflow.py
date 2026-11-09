@@ -365,13 +365,10 @@ class DurableQueue:
         if path.is_file():
             return path.read_bytes()
         key = os.urandom(32)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(path, flags, 0o600)
+        fd = os.open(path, _io_flags(os.O_WRONLY, os.O_CREAT, os.O_EXCL), 0o600)
         try:
             os.write(fd, key)
-            os.fchmod(fd, 0o600)
+            _fchmod_owner(fd)
         finally:
             os.close(fd)
         return key
@@ -450,23 +447,16 @@ class ClaimLedger:
         if path.is_file():
             return path.read_bytes()
         key = os.urandom(32)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(path, flags, 0o600)
+        fd = os.open(path, _io_flags(os.O_WRONLY, os.O_CREAT, os.O_EXCL), 0o600)
         try:
             os.write(fd, key)
-            os.fchmod(fd, 0o600)
+            _fchmod_owner(fd)
         finally:
             os.close(fd)
         return key
 
     def _acquire_active(self, key: str) -> None:
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        if hasattr(os, "O_CLOEXEC"):
-            flags |= os.O_CLOEXEC
+        flags = _io_flags(os.O_CREAT, os.O_EXCL, os.O_WRONLY)
         try:
             fd = os.open(self._active, flags, 0o600)
         except FileExistsError as exc:
@@ -1319,16 +1309,34 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _atomic_json(path: Path, payload: object) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    if hasattr(os, "O_NOFOLLOW"):
+def _io_flags(*parts: int) -> int:
+    """Binary create flags. Windows text mode rewrites 0x0A and breaks the MAC key."""
+
+    flags = 0
+    for part in parts:
+        flags |= part
+    if os.name != "nt" and hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
-    fd = os.open(path, flags, 0o600)
+    binary = getattr(os, "O_BINARY", 0)
+    return flags | binary
+
+
+def _fchmod_owner(fd: int) -> None:
+    if not hasattr(os, "fchmod"):
+        return
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:
+        return
+
+
+def _atomic_json(path: Path, payload: object) -> None:
+    fd = os.open(path, _io_flags(os.O_WRONLY, os.O_CREAT, os.O_TRUNC), 0o600)
     try:
         os.write(fd, (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode("utf-8"))
-        os.fchmod(fd, 0o600)
+        _fchmod_owner(fd)
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -1341,15 +1349,10 @@ def _read_lines(path: Path) -> set[str]:
 
 
 def _write_lines(path: Path, values: set[str]) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    fd = os.open(path, flags, 0o600)
+    fd = os.open(path, _io_flags(os.O_WRONLY, os.O_CREAT, os.O_TRUNC), 0o600)
     try:
         os.write(fd, ("".join(f"{item}\n" for item in sorted(values))).encode("utf-8"))
-        os.fchmod(fd, 0o600)
+        _fchmod_owner(fd)
         os.fsync(fd)
     finally:
         os.close(fd)

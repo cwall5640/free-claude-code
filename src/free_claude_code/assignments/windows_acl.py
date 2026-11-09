@@ -254,6 +254,18 @@ def _apply_private_dacl(path: Path, sid: ctypes.c_void_p, acl: ctypes.Array[ctyp
         raise Forbidden("cannot replace the secret-file ACL")
 
 
+def is_reparse_point(path: Path) -> bool:
+    """True when the path itself is a symlink, junction, or other reparse point."""
+
+    if not path.exists() and not path.is_symlink():
+        return False
+    try:
+        _inspect(path, directory=path.is_dir() or path.is_symlink())
+    except Forbidden as exc:
+        return "reparse" in str(exc)
+    return False
+
+
 def file_is_current_user_only(path: Path) -> bool:
     try:
         return _inspect(path, directory=path.is_dir())[0]

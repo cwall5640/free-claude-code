@@ -68,8 +68,10 @@ class SlackFixture(threading.Thread):
         return f"http://{host}:{port}/api"
 
     def stop(self) -> None:
+        if self.is_alive():
+            self.httpd.shutdown()
+            self.join(timeout=2)
         self.httpd.server_close()
-        self.join(timeout=2)
 
 
 def _secrets(path: Path, token: str = TOKEN) -> None:
