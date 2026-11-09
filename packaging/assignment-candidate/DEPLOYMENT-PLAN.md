@@ -181,13 +181,15 @@ Rollback: revoke the Slack app token in Slack's settings and remove `slack_bot` 
 
 ### Step 6. Startup and plugged-in wake
 
-Who approves: Casey. The current package does not do this.
+**Casey's OK** before `RegisterStartup`. Install still does not register a task.
 
-Intended behavior, not built as a live switch: start only after Windows sign-in, and stay awake only when the session is active, the machine is plugged in, and the network is online. Otherwise queue the work. Do not change the power scheme.
+`RegisterStartup` registers one per-user task named `claude1-assignment-worker`. It runs at logon for the current user only, with `LeastPrivilege` and `InteractiveToken`. It is not SYSTEM, not an elevated task, and it does not run when the user is logged off. The command is the venv Python at `C:\Users\<user>\claude1-assignment-candidate\claude1-assignment-venv` and the config directory `C:\Users\<user>\claude1-worker-config`. The arguments are paths only. Running it again replaces that same task. `UnregisterStartup` deletes that task name and no other. Both commands are in `activation-rollback.json`.
 
-What the package does today: Install writes `startup-plan.json` with `enabled` false and `registered_with_os` false. Activate and RunOnce exit 2. `activation-rollback.json` says not to register a sign-in task and not to change power settings.
+Until a later activation build, the logon command logs `disabled` and exits. It does not read the secret file and it does not call GitHub or Slack. `run-once` and `Activate` still exit 2.
 
-Disposable check, from `windows/RUNBOOK.md`. Use a new empty directory. Do not point `-Root` at `FreeClaudeCode`, `fcc-pilot-runner-20261108`, Inkbound, or a coding-trial task.
+While a real task is running, and only while the machine is on AC power, the worker calls `SetThreadExecutionState` with `ES_CONTINUOUS|ES_SYSTEM_REQUIRED`. It clears that request when the task ends, on an error, or when the cord is unplugged. It re-checks AC power about every 30 seconds. It does not keep the display on and it does not call `powercfg` or change the power plan. On Linux the wake call does nothing.
+
+Disposable check, from `windows/RUNBOOK.md`. Use a new empty directory. Do not point `-Root` at `FreeClaudeCode`, `fcc-pilot-runner-20261108`, Inkbound, or a coding-trial task. Do not run `RegisterStartup` as part of the disposable check.
 
 ```powershell
 powershell.exe -NoProfile -NonInteractive -File .\Invoke-AssignmentCandidate.ps1 -Mode ShowContract -Root .\scratch -Python C:\Users\<user>\AppData\Local\Programs\Python\Python314\python.exe -SourceRoot C:\path\to\repo\src
@@ -199,7 +201,7 @@ Verify: ShowContract exits 0 only when Python and SourceRoot are set, and the co
 
 Rollback: delete only that scratch directory. See `activation-rollback.json`.
 
-Do not create a sign-in scheduled task in this step. A later build must gain Casey's OK before any task is registered, and this document has no registration command on purpose.
+**Casey's OK** is what allows `RegisterStartup` on a real machine. The disposable check must leave scheduled tasks and the power scheme unchanged.
 
 ### Step 7. Flip the live switch
 
@@ -283,7 +285,7 @@ Do these in order for each new Windows machine. The laptop account is `<user>`. 
 4. Clone `https://github.com/cwall5640/free-claude-code.git` and check out `main` only after this plan is on `main`. Record the SHA. Confirm `.github/workflows/post-merge.yml` and `.github/workflows/validate-bug-report-version.yml` are absent. Leave `.github/dependabot.yml` unless Casey says otherwise.
 5. Native validation must pass before any later step. From the clone, with the disposable virtual environment:
    ```text
-   python -m pytest tests/assignments/test_automatic_workflow.py tests/assignments/test_slack_poster.py tests/assignments/test_assignment_sandbox.py tests/assignments/test_http_adapters.py --noconftest -o addopts=''
+   python -m pytest tests/assignments/test_automatic_workflow.py tests/assignments/test_slack_poster.py tests/assignments/test_assignment_sandbox.py tests/assignments/test_http_adapters.py tests/assignments/test_startup_task.py --noconftest -o addopts=''
    python tests/assignments/run_windows_secret_tests.py
    ```
    Also run `tests/assignments/test_manager_sign_cli.py` when that file is in the clone. Then the manual checks in `windows/RUNBOOK.md`, using a new empty directory that is not the Free Claude Code install: ShowContract exits 0 with Python and SourceRoot set, ShowContract exits 2 without them, Install exits 0 with `enabled` false and `registered_with_os` false, Activate exits 2, RunOnce exits 2, no new scheduled task, the power scheme is unchanged, and the disposable root's ACL is current-user-only. The secret script must be 3/3 OK. The proxy still returns 200. A failure stops the checklist. This step does not enable the worker.
@@ -292,4 +294,4 @@ Do these in order for each new Windows machine. The laptop account is `<user>`. 
 8. **Casey's OK.** Create this worker's publisher token as in deployment step 4. Store `github_publish` in the secret file next to `managers.json`, with a current-user-only ACL. Use the secure secret form. Never chat.
 9. **Casey's OK.** Create this worker's Slack app as in deployment step 5. One app, named `claudeN`, scope `chat:write` only, invited only to `#all-bot-army`, token stored as `slack_bot` in that same secret file. Leave `slack_enabled` false.
 10. **Casey's OK** before any new `waiting:claudeN` label. `waiting:claude1` is already in the PM-BRIEFING. `waiting:claude2` and `waiting:claude3` need a PM-BRIEFING update that Casey approves before the label is created. Do not create the label first.
-11. **Casey's OK** before startup registration, power changes, `enabled` true, `slack_enabled` true, the supervised test task, or the `#all-bot-army` announcement. Those are deployment steps 6 through 9 in section 3. The package still refuses `run-once` with exit 2. Do not invent a switch.
+11. **Casey's OK** before `RegisterStartup`, power changes, `enabled` true, `slack_enabled` true, the supervised test task, or the `#all-bot-army` announcement. Registration is deployment step 6: `-Mode RegisterStartup` creates `claude1-assignment-worker`, and `-Mode UnregisterStartup` removes that name only. It does not change the power plan. The logon process still logs disabled and does not touch GitHub or Slack. `run-once` still exits 2.
