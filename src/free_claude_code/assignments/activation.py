@@ -24,7 +24,10 @@ def is_activated(root: Path) -> bool:
     path = record_path(root)
     if not path.is_file() or path.is_symlink():
         return False
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeError, OSError):
+        return False
     if not isinstance(raw, dict):
         return False
     return (
@@ -64,7 +67,10 @@ def _load(root: Path) -> dict[str, object]:
     path = record_path(root)
     if not path.is_file() or path.is_symlink():
         return {"executed": False, "activation_enabled": False}
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeError, OSError) as exc:
+        raise Forbidden("activation record is unreadable or malformed") from exc
     if not isinstance(raw, dict):
         raise Forbidden("activation record is not an object")
     return raw
