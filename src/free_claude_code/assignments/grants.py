@@ -74,6 +74,30 @@ def verify_grant(
         raise Forbidden("model grant does not allow this action")
 
 
+def load_grant(path: Path) -> ModelGrant | None:
+    """Read a grant file written by an operator or manager signer.
+
+    Returns None when no grant file exists (no model pass is authorized).
+    A present but malformed file fails loudly: silently skipping a broken
+    grant would disguise a configuration error as an ungranted task.
+    """
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return ModelGrant(
+            manifest_id=str(raw["manifest_id"]),
+            repo=str(raw["repo"]),
+            base_sha=str(raw["base_sha"]),
+            issue_revision=str(raw["issue_revision"]),
+            expires_at=int(raw["expires_at"]),
+            actions=tuple(str(item) for item in raw["actions"]),
+            signature=str(raw["signature"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ApprovalInvalid("model grant file is malformed") from exc
+
+
 def load_revocations(path: Path) -> set[str]:
     if not path.is_file():
         return set()

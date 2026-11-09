@@ -215,6 +215,7 @@ def _candidate(state: Path, config: Path, runtime: dict[str, object]) -> Assignm
         command_cwd=str(runtime["command_cwd"]),
         allowed_path_prefixes=tuple(runtime["allowed_path_prefixes"]),
         command_timeout_seconds=float(runtime["command_timeout_seconds"]),
+        grants_dir=state / "grants",
         repair_limit=REPAIR_LIMIT,
         identity=identity,
     )
@@ -224,6 +225,7 @@ def _candidate(state: Path, config: Path, runtime: dict[str, object]) -> Assignm
         candidate.publish_origin = origin
     if runtime["ca_file"]:
         candidate.publish_ca_file = Path(str(runtime["ca_file"]))
+    candidate.grant_key = secrets.optional("grant_key")
     return candidate
 
 

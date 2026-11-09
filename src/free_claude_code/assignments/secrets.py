@@ -60,6 +60,11 @@ class SecretFile:
             raise Forbidden(f"missing secret {name}")
         return value
 
+    def optional(self, name: str) -> str:
+        if name not in _NAMES:
+            raise Forbidden("unknown secret name")
+        return self._values.get(name, "")
+
 
 def posix_mode_is_private(mode: int, *, directory: bool) -> bool:
     """Owner-only bits. This is not used as the Windows decision."""

@@ -42,6 +42,7 @@ from free_claude_code.assignments.execution import (
     scrub_env,
 )
 from free_claude_code.assignments.github_http import GitHubHttpClient
+from free_claude_code.assignments.grants import load_grant, load_revocations
 from free_claude_code.assignments.models import AllowlistEntry, AssignmentConfig, PublicationPlan
 from free_claude_code.assignments.private_io import atomic_write_private, write_private_bytes
 from free_claude_code.assignments.secrets import (
@@ -652,6 +653,8 @@ class AssignmentCandidate:
         command_cwd: str,
         allowed_path_prefixes: tuple[str, ...] = ("src",),
         command_timeout_seconds: float = 10.0,
+        grants_dir: Path | None = None,
+        model_proxy_base_url: str = "http://127.0.0.1:8082",
         repair_limit: int = REPAIR_LIMIT,
         awake_seconds: float = 30.0,
         identity: WorkerIdentity | None = None,
@@ -668,6 +671,8 @@ class AssignmentCandidate:
         self.command_cwd = command_cwd
         self.allowed_path_prefixes = tuple(allowed_path_prefixes)
         self.command_timeout_seconds = float(command_timeout_seconds)
+        self.grants_dir = grants_dir
+        self.model_proxy_base_url = model_proxy_base_url
         self.repair_limit = repair_limit
         self.awake_seconds = awake_seconds
         self.issues = IssueCreation()
@@ -861,12 +866,16 @@ class AssignmentCandidate:
     def _run_model_if_granted(self, manifest: object, child_env: dict[str, str]) -> None:
         if self.model_grant is None and self.model_grant_factory is not None:
             self.model_grant = self.model_grant_factory(manifest)
+        if self.model_grant is None and self.grants_dir is not None:
+            self.model_grant = load_grant(
+                self.grants_dir / f"{manifest.manifest_id}.json"  # type: ignore[attr-defined]
+            )
         if self.model_grant is None:
             return
         from free_claude_code.assignments.execution import NvidiaClaudeLauncher
 
         proxy_auth = load_secret_file(self.paths.secrets_file).get("proxy_auth")
-        launcher = NvidiaClaudeLauncher("claude", "http://127.0.0.1:9", proxy_auth)
+        launcher = NvidiaClaudeLauncher("claude", self.model_proxy_base_url, proxy_auth)
         if self.model_spawn is None:
             launcher.run(
                 manifest,  # type: ignore[arg-type]
@@ -874,7 +883,7 @@ class AssignmentCandidate:
                 self.model_grant,
                 grant_key=self.grant_key,
                 now=self.now,
-                revocations=set(),
+                revocations=load_revocations(self.paths.state_dir / "revocations.txt"),
                 spawn=None,
             )
             return
@@ -892,7 +901,7 @@ class AssignmentCandidate:
             self.model_grant,
             grant_key=self.grant_key,
             now=self.now,
-            revocations=set(),
+            revocations=load_revocations(self.paths.state_dir / "revocations.txt"),
             spawn=spawn,
         )
         if any(name in child_env for name in PUBLISHER_ENV):
