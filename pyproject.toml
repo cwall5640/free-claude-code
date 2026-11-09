@@ -29,6 +29,7 @@ dependencies = [
     "jsonschema>=4.25.0",
     "json5>=0.17.3",
     "tomlkit>=0.15.2",
+    "cryptography>=41",
     "google-auth[requests]>=2.56.3",
     "requests[socks]>=2.34.2",
     "pystray>=0.19.5; sys_platform == 'win32' or sys_platform == 'darwin'",
