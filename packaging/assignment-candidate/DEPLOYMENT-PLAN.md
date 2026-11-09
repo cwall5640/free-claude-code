@@ -6,26 +6,17 @@ Minerva takes over from Vibe Coder from here. This section is the current state.
 
 ### Done
 
-Steps 1 through 5 are done.
+Steps 1 through 6 are done.
 
 - The three manager private keys are on the shared bot computer. See the evidence paths below. The laptop copy is public keys only.
 - The publisher token for claude1 exists and is stored as `github_publish` in the worker secret file. Do not print it.
 - The Slack app is `claude1`. Its only bot scope is `chat:write`. `slack_enabled` is false.
 - Casey's `/invite @claude1` to `#all-bot-army` is unconfirmed. Do not assume the bot is in the channel.
-
-### Step 6 is partial
-
-The worker is installed and disabled.
-
-- Install: `C:\Users\cwall\claude1-assignment-candidate`
-- Venv, a sibling of that install: `C:\Users\cwall\claude1-assignment-venv`
-- Source: `C:\Users\cwall\claude1-src-eeeca5c`
-
-There is no logon task yet. The power scheme is unchanged. Do not register the task before the pull request below is merged.
+- Step 6 is complete. The worker is installed and disabled at `C:\Users\cwall\claude1-assignment-candidate`, with the venv at `C:\Users\cwall\claude1-assignment-venv` and the source at `C:\Users\cwall\claude1-src-eeeca5c`. The task `claude1-assignment-worker` is registered from `main` `5c2a006cd970c01bc6ef9a326580cdce9ab7bc52`. A disabled logon was verified: exit 0, and the log said `disabled logon idle`. The power scheme is unchanged.
 
 ### Pull request 5
 
-Pull request 5 is merged. `main` for the logon task is `5c2a006cd970c01bc6ef9a326580cdce9ab7bc52`. There is still no logon task on the laptop.
+Pull request 5 is merged. `main` for the registered logon task is `5c2a006cd970c01bc6ef9a326580cdce9ab7bc52`.
 
 ### Activation pull request
 
@@ -33,10 +24,9 @@ Branch `cursor/claude1-activation` is the build that honors the enabled switch. 
 
 ### After that merge
 
-Run `RegisterStartup` on the laptop. A reboot is not required. Then verify two things:
+`RegisterStartup` is already done from `main` `5c2a006cd970c01bc6ef9a326580cdce9ab7bc52`. No reboot was required. The disabled logon check passed: exit 0, log text `disabled logon idle`, and it did not call GitHub, Slack, or the proxy.
 
-- A disabled logon writes `disabled`, exits, and does not call GitHub, Slack, or the proxy.
-- Proxy auto-start is the enabled path only. It checks `http://127.0.0.1:8082/health` and, if needed, starts the existing Free Claude Code launcher. Do not flip `enabled` or `slack_enabled` to demonstrate that until step 7 has its own OK.
+Proxy auto-start is the enabled path only. It checks `http://127.0.0.1:8082/health` and, if needed, starts the existing Free Claude Code launcher. Do not flip `enabled` or `slack_enabled` to demonstrate that until step 7 has its own OK.
 
 ### Still needs Casey's separate OK
 
@@ -54,7 +44,7 @@ No independent review was requested, so the pull request has no Low findings yet
 - The task name `claude1-assignment-worker` is only for claude1. claude2 and claude3 are not registered by this change.
 - The task time limit is 4 hours. The AC recheck is about every 30 seconds.
 - A disabled logon exits 0 so Task Scheduler does not record a failure. `run-once` and `Activate` still exit 2.
-- The real `schtasks` registration has not been run. Linux tests check the task XML and the wake helper with mocks.
+- The laptop task `claude1-assignment-worker` is registered from `main` `5c2a006cd970c01bc6ef9a326580cdce9ab7bc52`, and the disabled logon returned exit 0 with `disabled logon idle`. Linux tests still mock Task Scheduler and the wake helper. The activation pull request has not been registered as a replacement task.
 - The activation build is live only when `worker.json` has `enabled` true and `Activate` has recorded `approved_by`, `approved_at`, and `approval_reference`. Either switch alone stays off. `Deactivate` flips the record back. `slack_enabled` stays false until step 7.
 - The default Free Claude Code launcher is `start-windows.ps1` in the original install. `fcc_launcher` in `worker.json` overrides it. An empty value means that default.
 
