@@ -9,16 +9,16 @@ environments never import this module's token.
 import json
 import os
 import re
-import stat
 import subprocess
 import sys
 from pathlib import Path
 
 from free_claude_code.assignments.errors import Disabled, Forbidden, MergeRejected
 from free_claude_code.assignments.execution import resolve_program, scrub_env
+from free_claude_code.assignments.private_io import write_private_bytes
 from free_claude_code.assignments.github_http import GitHubHttpClient
 from free_claude_code.assignments.models import PublicationPlan
-from free_claude_code.assignments.secrets import load_secret_file, refuse_symlink_or_reparse
+from free_claude_code.assignments.secrets import load_secret_file
 
 _PREFIX = re.compile(r"claude[1-9][0-9]*\Z")
 
@@ -165,22 +165,13 @@ def publish_feature(
 
 def _token_file(directory: Path, token: str) -> Path:
     path = directory / "askpass-token"
-    refuse_symlink_or_reparse(is_symlink=path.is_symlink(), reparse=False)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags, 0o600)
-    try:
-        os.write(fd, token.encode("utf-8"))
-        os.fchmod(fd, 0o600)
-    finally:
-        os.close(fd)
+    write_private_bytes(path, token.encode("utf-8"))
     return path
 
 
 def _askpass_helper(directory: Path) -> Path:
     script = directory / "askpass.py"
-    script.write_text(
+    body = (
         "import os\n"
         "import pathlib\n"
         "import sys\n"
@@ -189,18 +180,18 @@ def _askpass_helper(directory: Path) -> Path:
         "if 'username' in prompt.lower():\n"
         "    print('x-access-token')\n"
         "else:\n"
-        "    print(token)\n",
-        encoding="utf-8",
+        "    print(token)\n"
     )
     if os.name == "nt":
+        write_private_bytes(script, body.encode("utf-8"))
         launcher = directory / "askpass.cmd"
-        launcher.write_text(
-            f'@echo off\r\n"{sys.executable}" "%~dp0askpass.py" %*\r\n',
-            encoding="utf-8",
+        write_private_bytes(
+            launcher,
+            f'@echo off\r\n"{sys.executable}" "%~dp0askpass.py" %*\r\n'.encode("utf-8"),
         )
         return launcher
-    script.write_text("#!/usr/bin/env python3\n" + script.read_text(encoding="utf-8"), encoding="utf-8")
-    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    write_private_bytes(script, ("#!/usr/bin/env python3\n" + body).encode("utf-8"))
+    script.chmod(0o700)
     return script
 
 

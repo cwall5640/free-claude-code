@@ -734,12 +734,87 @@ def test_real_repair_loop_commits_any_allowlisted_edit_and_opens_pr(tmp_path: Pa
     assert '"operator_id": "vibe-1"' in events
     assert '"operator_id": "operator"' not in events
     claims = tmp_path / "run" / "state" / "claims" / "claims.json"
+    _assert_private_state(claims)
+
+
+def test_other_state_files_are_private(tmp_path: Path) -> None:
+    """Queue, lock, journal, approval, nonce, and startup files are private too."""
+
+    from free_claude_code.assignments.models import Approval
+    from free_claude_code.assignments.private_io import atomic_write_private
+    from free_claude_code.assignments.store import StateStore
+
+    ledger = ClaimLedger(tmp_path / "state" / "claims")
+    ledger.claim("owner/repo#9", "dev:claude1", "a" * 40)
+    queue = DurableQueue(tmp_path / "state" / "queue")
+    queue.push({"issue_number": 9, "issue_node_id": "node-9"})
+    store = StateStore(tmp_path / "state" / "service")
+    store.record("owner/repo#9", {"detail": "task log", "status": "started"})
+    store.save_approval(
+        Approval(
+            manifest_id="manifest-1",
+            phase="execute",
+            operator_id="vibe-1",
+            issue_revision="rev",
+            base_sha="a" * 40,
+            scope_fingerprint="scope",
+        )
+    )
+    verifier = _verifier(tmp_path / "state" / "verifier")
+    verifier.consume_nonce("nonce-1")
+    install_disabled_startup(tmp_path / "state" / "startup")
+    paths = [
+        tmp_path / "state" / "claims" / "claims.json",
+        tmp_path / "state" / "claims" / "integrity.key",
+        tmp_path / "state" / "claims" / "active.lock",
+        tmp_path / "state" / "queue" / "queue.json",
+        tmp_path / "state" / "queue" / "integrity.key",
+        tmp_path / "state" / "service" / "events.jsonl",
+        tmp_path / "state" / "verifier" / "nonces.txt",
+        tmp_path / "state" / "startup" / "startup-plan.json",
+        tmp_path / "state" / "startup" / "enabled",
+        *sorted((tmp_path / "state" / "service" / "status").glob("*.json")),
+        *sorted((tmp_path / "state" / "service" / "approvals").glob("*.json")),
+    ]
+    assert len(paths) >= 11
+    for path in paths:
+        assert path.is_file()
+        _assert_private_state(path)
+    for directory in (
+        tmp_path / "state" / "claims",
+        tmp_path / "state" / "queue",
+        tmp_path / "state" / "service",
+        tmp_path / "state" / "service" / "status",
+        tmp_path / "state" / "service" / "approvals",
+    ):
+        _assert_private_state(directory)
+
+    seen: list[Path] = []
+    real_replace = os.replace
+
+    def wrapped(src: str | Path, dst: str | Path) -> None:
+        seen.append(Path(src))
+        _assert_private_state(Path(src))
+        real_replace(src, dst)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(os, "replace", wrapped)
+    try:
+        atomic_write_private(tmp_path / "state" / "replaced.json", b'{"ok": true}\n')
+    finally:
+        monkeypatch.undo()
+    assert seen
+    assert seen[0].name.startswith(".replaced.json.")
+    _assert_private_state(tmp_path / "state" / "replaced.json")
+
+
+def _assert_private_state(path: Path) -> None:
     if sys.platform == "win32":
         from free_claude_code.assignments.windows_acl import file_is_current_user_only
 
-        assert file_is_current_user_only(claims)
-    else:
-        assert claims.stat().st_mode & 0o077 == 0
+        assert file_is_current_user_only(path)
+        return
+    assert path.stat().st_mode & 0o077 == 0
 
 
 def test_missing_label_forged_expired_revoked_replay_and_wrong_repo(tmp_path: Path) -> None:

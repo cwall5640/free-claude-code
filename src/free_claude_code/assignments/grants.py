@@ -9,6 +9,7 @@ from pathlib import Path
 
 from free_claude_code.assignments.errors import ApprovalInvalid, Forbidden
 from free_claude_code.assignments.models import TaskManifest
+from free_claude_code.assignments.private_io import append_private_bytes, ensure_private_dir
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +81,5 @@ def load_revocations(path: Path) -> set[str]:
 
 
 def revoke_grant(path: Path, manifest_id: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(manifest_id + "\n")
+    ensure_private_dir(path.parent)
+    append_private_bytes(path, (manifest_id + "\n").encode("utf-8"))

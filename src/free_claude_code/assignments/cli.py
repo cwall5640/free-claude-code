@@ -31,6 +31,7 @@ from free_claude_code.assignments.models import (
     AssignmentConfig,
     TaskManifest,
 )
+from free_claude_code.assignments.private_io import ensure_private_dir, write_private_bytes
 from free_claude_code.assignments.redact import redact
 from free_claude_code.assignments.secrets import SecretFile, load_secret_file
 from free_claude_code.assignments.service import AssignmentService
@@ -267,8 +268,8 @@ def _write_grant(operator: OperatorFile, secrets: SecretFile, manifest: TaskMani
     )
     grant = sign_grant(secrets.get("grant_key"), unsigned)
     path = operator.state_dir / "grants" / f"{manifest.manifest_id}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_grant_dict(grant), sort_keys=True) + "\n", encoding="utf-8")
+    ensure_private_dir(path.parent)
+    write_private_bytes(path, (json.dumps(_grant_dict(grant), sort_keys=True) + "\n").encode("utf-8"))
 
 
 def _implement(operator: OperatorFile, secrets: SecretFile, manifest: TaskManifest, now: int) -> None:
@@ -345,10 +346,10 @@ def _save_manifest(operator: OperatorFile, manifest: TaskManifest) -> None:
     from free_claude_code.assignments.service import manifest_payload
 
     path = operator.state_dir / "current-manifest.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(path.parent)
     payload = manifest_payload(manifest, None)
     payload["max_patch_bytes"] = manifest.scope.max_patch_bytes
-    path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    write_private_bytes(path, (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode("utf-8"))
 
 
 def _load_manifest(operator: OperatorFile) -> TaskManifest:

@@ -12,6 +12,12 @@ from typing import Any
 
 from free_claude_code.assignments.errors import Conflict
 from free_claude_code.assignments.models import Approval
+from free_claude_code.assignments.private_io import (
+    append_private_bytes,
+    atomic_write_private,
+    ensure_private_dir,
+    write_private_bytes,
+)
 from free_claude_code.assignments.redact import redact_value
 
 
@@ -19,8 +25,7 @@ class StateStore:
     """Append-only journal plus the latest status for each task."""
 
     def __init__(self, root: Path) -> None:
-        self.root = root
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.root = ensure_private_dir(root)
         self._thread = threading.Lock()
 
     def record(self, task_key: str, event: dict[str, Any]) -> dict[str, Any]:
@@ -28,20 +33,11 @@ class StateStore:
         if not isinstance(safe, dict):
             raise Conflict("status event was not an object")
         slug = hashlib.sha256(task_key.encode("utf-8")).hexdigest()[:24]
+        encoded = (json.dumps(safe, sort_keys=True) + "\n").encode("utf-8")
         with self._thread:
-            journal = self.root / "events.jsonl"
-            with journal.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(safe, sort_keys=True) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+            append_private_bytes(self.root / "events.jsonl", encoded)
             status_path = self.root / "status" / f"{slug}.json"
-            status_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = status_path.with_suffix(".tmp")
-            temporary.write_text(
-                json.dumps(safe, sort_keys=True, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            os.replace(temporary, status_path)
+            atomic_write_private(status_path, (json.dumps(safe, sort_keys=True, indent=2) + "\n").encode("utf-8"))
         return safe
 
     def read_status(self, task_key: str) -> dict[str, Any] | None:
@@ -59,13 +55,13 @@ class StateStore:
         """Hold an exclusive file lock for one task revision."""
 
         slug = hashlib.sha256(task_key.encode("utf-8")).hexdigest()[:24]
-        lock_dir = self.root / "locks"
-        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_dir = ensure_private_dir(self.root / "locks")
         path = lock_dir / f"{slug}.lock"
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            write_private_bytes(path, b"", exclusive=True)
         except FileExistsError as exc:
             raise Conflict("another handoff already holds this assignment") from exc
+        fd = os.open(path, os.O_RDONLY)
         try:
             yield
         finally:
@@ -77,7 +73,6 @@ class StateStore:
 
     def save_approval(self, approval: Approval) -> None:
         path = self._approval_path(approval.manifest_id, approval.phase)
-        path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "base_sha": approval.base_sha,
             "issue_revision": approval.issue_revision,
@@ -86,9 +81,7 @@ class StateStore:
             "phase": approval.phase,
             "scope_fingerprint": approval.scope_fingerprint,
         }
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(temporary, path)
+        atomic_write_private(path, (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"))
 
     def get_approval(self, manifest_id: str, phase: str) -> Approval | None:
         path = self._approval_path(manifest_id, phase)

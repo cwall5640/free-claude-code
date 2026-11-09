@@ -43,6 +43,7 @@ from free_claude_code.assignments.execution import (
 )
 from free_claude_code.assignments.github_http import GitHubHttpClient
 from free_claude_code.assignments.models import AllowlistEntry, AssignmentConfig, PublicationPlan
+from free_claude_code.assignments.private_io import atomic_write_private, write_private_bytes
 from free_claude_code.assignments.secrets import (
     load_secret_file,
     refuse_symlink_or_reparse,
@@ -366,12 +367,7 @@ class DurableQueue:
         if path.is_file():
             return path.read_bytes()
         key = os.urandom(32)
-        fd = os.open(path, _io_flags(os.O_WRONLY, os.O_CREAT, os.O_EXCL), 0o600)
-        try:
-            os.write(fd, key)
-            _fchmod_owner(fd)
-        finally:
-            os.close(fd)
+        write_private_bytes(path, key, exclusive=True)
         return key
 
 
@@ -448,28 +444,18 @@ class ClaimLedger:
         if path.is_file():
             return path.read_bytes()
         key = os.urandom(32)
-        fd = os.open(path, _io_flags(os.O_WRONLY, os.O_CREAT, os.O_EXCL), 0o600)
-        try:
-            os.write(fd, key)
-            _fchmod_owner(fd)
-        finally:
-            os.close(fd)
+        write_private_bytes(path, key, exclusive=True)
         return key
 
     def _acquire_active(self, key: str) -> None:
-        flags = _io_flags(os.O_CREAT, os.O_EXCL, os.O_WRONLY)
+        payload = f"{os.getpid()}\n{int(time.time()) + 120}\n{key}\n".encode("utf-8")
         try:
-            fd = os.open(self._active, flags, 0o600)
+            write_private_bytes(self._active, payload, exclusive=True)
         except FileExistsError as exc:
             if not self._lock_is_stale():
                 raise Conflict("one assignment is already active") from exc
             self._release_active()
-            fd = os.open(self._active, flags, 0o600)
-        expiry = int(time.time()) + 120
-        try:
-            os.write(fd, f"{os.getpid()}\n{expiry}\n{key}\n".encode("utf-8"))
-        finally:
-            os.close(fd)
+            write_private_bytes(self._active, payload, exclusive=True)
 
     def _lock_is_stale(self) -> bool:
         try:
@@ -1216,8 +1202,7 @@ def install_disabled_startup(root: Path) -> Path:
         "command": "python -m free_claude_code.assignments.candidate run-once",
     }
     _atomic_json(target / "startup-plan.json", plan)
-    (target / "enabled").write_text("false\n", encoding="utf-8")
-    os.chmod(target / "enabled", 0o600)
+    write_private_bytes(target / "enabled", b"false\n")
     return target / "startup-plan.json"
 
 
@@ -1327,23 +1312,8 @@ def _io_flags(*parts: int) -> int:
     return flags | binary
 
 
-def _fchmod_owner(fd: int) -> None:
-    if not hasattr(os, "fchmod"):
-        return
-    try:
-        os.fchmod(fd, 0o600)
-    except OSError:
-        return
-
-
 def _atomic_json(path: Path, payload: object) -> None:
-    fd = os.open(path, _io_flags(os.O_WRONLY, os.O_CREAT, os.O_TRUNC), 0o600)
-    try:
-        os.write(fd, (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode("utf-8"))
-        _fchmod_owner(fd)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    atomic_write_private(path, (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode("utf-8"))
 
 
 def _read_lines(path: Path) -> set[str]:
@@ -1353,13 +1323,7 @@ def _read_lines(path: Path) -> set[str]:
 
 
 def _write_lines(path: Path, values: set[str]) -> None:
-    fd = os.open(path, _io_flags(os.O_WRONLY, os.O_CREAT, os.O_TRUNC), 0o600)
-    try:
-        os.write(fd, ("".join(f"{item}\n" for item in sorted(values))).encode("utf-8"))
-        _fchmod_owner(fd)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    atomic_write_private(path, ("".join(f"{item}\n" for item in sorted(values))).encode("utf-8"))
 
 
 def prepare_secret_file(path: Path, publish_token: str) -> None:

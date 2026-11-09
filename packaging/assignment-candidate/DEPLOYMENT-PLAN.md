@@ -66,8 +66,9 @@ Head history that matters, oldest first:
 | `8b2aebf2` | Windows git working-directory and secret-fixture fixes. |
 | `e1d196d8` | Test fixture finds `git-http-backend` from `git --exec-path`. |
 | `e16b1e01` | Test-only. On Windows, `claims.json` privacy uses the ACL helper instead of POSIX mode bits. |
+| `a598ec0d` | Deployment plan only. No production change. |
 
-This deployment plan commit sits on top of `e16b1e01`. Confirm the pull request head on GitHub before you treat any SHA above as current.
+Confirm the pull request head on GitHub before you treat any SHA above as current. The state-file ACL fix is the commit after `a598ec0d`.
 
 Native Windows checks on the laptop, disposable directories only. The original Free Claude Code install was not the test target.
 
@@ -77,8 +78,11 @@ Native Windows checks on the laptop, disposable directories only. The original F
 | 2 | `7bd49f99` | 38 passed, 5 failed, 0 skipped | PASS. Secret unittest 3/3 OK, junction reparse validated. |
 | 3 | `8b2aebf2` | 40 passed, 3 failed, 0 skipped | Security, DACL, reparse, and PowerShell tests passed. Three failures were git checkout working directory and secret-folder ACL fixtures. |
 | 4 | `e1d196d8` | 42 passed, 1 failed, 0 skipped | PASS. Secret unittest 3/3 OK with native ACL. The one failure was `claims.json` mode bits `33206` (`0o100666`). NTFS privacy is the DACL, not those bits. |
+| 5 | `a598ec0d` | 42 passed, 1 failed, 0 skipped | PASS. Secret unittest 3/3 OK. `claims.json` is not current-user-only. The file was created with the inherited DACL. Mode `0o600` does not change that on Windows. |
 
-The `e16b1e01` test fix addresses that last failure. Linux was rerun there: 40 passed, 3 skipped. Those three skips are the Windows-only DACL, junction, and PowerShell tests. The Windows secret script printed `windows_acl_execution=unrun` and `symlink_rejection=VALIDATED` on Linux. Nobody has rerun native Windows pytest on `e16b1e01` yet. Do that before merge. Do not call the Linux run a Windows pass.
+`e16b1e01` only changed the test. Run 5 showed the production gap: claims, and the same write path for the other state files, never called `harden_path`. The following commit hardens every state write (claims, queue, locks, integrity keys, nonces, startup plan, service journal, status, approvals, handoff artifacts, grant files, Slack `posted.txt`, and the publisher askpass token). The temp file is hardened before `os.replace`, and the destination is hardened after. POSIX mode is `0o600` for files and `0o700` for state directories.
+
+Linux rerun of that fix, Python 3.14.10: 41 passed, 3 skipped. The three skips are still the Windows-only DACL, junction, and PowerShell tests. The new state-file privacy test ran on Linux and checked mode bits. The Windows secret script printed `windows_acl_execution=unrun` and `symlink_rejection=VALIDATED`. Nobody has rerun native Windows pytest on the ACL fix yet. Do that before merge. Do not call the Linux run a Windows pass.
 
 Linux command used for the counts above:
 
@@ -106,7 +110,7 @@ Who approves: an independent reviewer, then Casey.
 
 Command: on GitHub, open pull request 2 and read the head SHA. It must be the SHA you intend to ship. Do not review an older SHA from this document if the pull request has moved.
 
-Verify: the review comment is signed, names that exact head SHA, and says what was and was not run. A Windows rerun of `e16b1e01` (or a later head) is still required. Record pass, fail, and skip counts.
+Verify: the review comment is signed, names that exact head SHA, and says what was and was not run. A Windows rerun of the state-file ACL fix (the commit after `a598ec0d`) is still required. Record pass, fail, and skip counts.
 
 Rollback: do not merge. Leave the pull request open.
 

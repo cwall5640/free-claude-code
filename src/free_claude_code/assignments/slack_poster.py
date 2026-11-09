@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 
 from free_claude_code.assignments.errors import Disabled, Forbidden
 from free_claude_code.assignments.execution import scrub_env
+from free_claude_code.assignments.private_io import atomic_write_private, ensure_private_dir
 from free_claude_code.assignments.secrets import load_secret_file, refuse_symlink_or_reparse
 
 _HANDOFF = re.compile(
@@ -89,13 +90,7 @@ def post_handoff(
         raise Forbidden("slack token must be a bot token")
     if token in line or token in endpoint or token in channel_id:
         raise Forbidden("slack token must not be placed in the message")
-    state_dir.mkdir(parents=True, exist_ok=True)
-    if os.name == "nt":
-        from free_claude_code.assignments.windows_acl import harden_path
-
-        harden_path(state_dir)
-    else:
-        os.chmod(state_dir, 0o700)
+    ensure_private_dir(state_dir)
     record = state_dir / "posted.txt"
     digest = hashlib.sha256(line.encode("utf-8")).hexdigest()
     if digest in _read_posted(record):
@@ -141,15 +136,7 @@ def _read_posted(path: Path) -> set[str]:
 def _remember(path: Path, digest: str) -> None:
     seen = _read_posted(path)
     seen.add(digest)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags, 0o600)
-    try:
-        os.write(fd, ("".join(f"{item}\n" for item in sorted(seen))).encode("utf-8"))
-        os.fchmod(fd, 0o600)
-    finally:
-        os.close(fd)
+    atomic_write_private(path, ("".join(f"{item}\n" for item in sorted(seen))).encode("utf-8"))
 
 
 def main(argv: list[str] | None = None) -> int:

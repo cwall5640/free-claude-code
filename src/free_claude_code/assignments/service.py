@@ -32,6 +32,7 @@ from free_claude_code.assignments.models import (
     validate_prefixes,
 )
 from free_claude_code.assignments.paths import contained, path_allowed, safe_relative
+from free_claude_code.assignments.private_io import ensure_private_dir, write_private_bytes
 from free_claude_code.assignments.redact import redact
 from free_claude_code.assignments.store import StateStore
 
@@ -214,7 +215,7 @@ class AssignmentService:
                 raise Conflict("this revision already has a handoff")
             self.store.record(manifest.task_key, {"status": "handoff_started"})
             try:
-                target.mkdir(parents=True, exist_ok=True)
+                ensure_private_dir(target)
                 patch_digest = None
                 if patch_path is not None:
                     patch_digest = self._copy_patch(
@@ -377,7 +378,7 @@ class AssignmentService:
         redacted = redact(text)
         if redacted != text:
             raise ScopeError("patch contains a credential-shaped string")
-        dest.write_text(text, encoding="utf-8")
+        write_private_bytes(dest, text.encode("utf-8"))
         return hashlib_text(text)
 
     def _manifest(
@@ -429,9 +430,7 @@ class AssignmentService:
             raise Forbidden("base branch is not a single ref name")
 
     def _artifact_root(self) -> Path:
-        root = self.store.root / "artifacts"
-        root.mkdir(parents=True, exist_ok=True)
-        return root
+        return ensure_private_dir(self.store.root / "artifacts")
 
     def _fail(self, task_key: str, status: str, detail: str) -> None:
         self.store.record(task_key, {"detail": detail, "status": status})
@@ -442,7 +441,7 @@ class AssignmentService:
 
     @staticmethod
     def _write_text(path: Path, text: str) -> None:
-        path.write_text(text, encoding="utf-8")
+        write_private_bytes(path, text.encode("utf-8"))
 
 
 def _json(payload: dict[str, object]) -> str:
