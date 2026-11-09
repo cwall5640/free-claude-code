@@ -27,6 +27,7 @@ class WorkerIdentity:
     slack_channel_id: str = ""
     slack_enabled: bool = False
     fcc_launcher: str = ""
+    enabled: bool = False
 
     def comment_suffix(self) -> str:
         return f"\n{self.comment_signature}\n"
@@ -72,6 +73,7 @@ def load_worker_identity(path: Path) -> WorkerIdentity:
         slack_channel_id=str(raw.get("slack_channel_id", "")).strip(),
         slack_enabled=_slack_enabled(raw),
         fcc_launcher=str(raw.get("fcc_launcher", "")).strip(),
+        enabled=_enabled_flag(raw),
     )
     validate_worker_identity(identity)
     return identity
@@ -104,6 +106,13 @@ def _launcher_is_absolute(text: str) -> bool:
     if text.startswith("/") or text.startswith("\\"):
         return True
     return len(text) >= 3 and text[1] == ":" and text[2] in "\\/"
+
+
+def _enabled_flag(raw: dict[str, object]) -> bool:
+    flag = raw.get("enabled", False)
+    if not isinstance(flag, bool):
+        raise Forbidden("enabled must be a boolean")
+    return flag
 
 
 def _slack_enabled(raw: dict[str, object]) -> bool:

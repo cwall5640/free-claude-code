@@ -15,7 +15,6 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from free_claude_code.assignments.errors import Forbidden
-from free_claude_code.assignments.fcc_proxy import ensure_fcc_proxy, launcher_from_worker_file
 from free_claude_code.assignments.private_io import append_private_bytes, ensure_private_dir
 
 TASK_NAME = "claude1-assignment-worker"
@@ -128,11 +127,9 @@ def unregister_logon_task(*, task_name: str, delete) -> None:
 
 
 def logon_once(root: Path, config: Path | None = None) -> int:
-    """Idle at sign-in until a later build honors activation.
+    """Idle unless worker.json and the activation record are both on.
 
-    A disabled worker does not read worker.json and does not start the proxy.
-    An enabled worker may read fcc_launcher from worker.json and then ensure
-    the original proxy. It still does not call GitHub or Slack.
+    A disabled worker does not read secrets and does not start the proxy.
     """
 
     if config is not None and config.is_symlink():
@@ -140,22 +137,13 @@ def logon_once(root: Path, config: Path | None = None) -> int:
         return 2
     _drop_secret_env()
     target = ensure_private_dir(root)
-    enabled = target / "enabled"
-    enabled_flag = enabled.is_file() and enabled.read_text(encoding="utf-8").strip() == "true"
-    if not enabled_flag:
-        detail = "logon idle"
-    else:
-        profile = config.parent if config is not None else Path.home()
-        launcher = launcher_from_worker_file(config, profile)
-        proxy = ensure_fcc_proxy(enabled=True, launcher=launcher)
-        if proxy not in {"healthy", "started"}:
-            detail = "proxy down; skipping task"
-        else:
-            # The approval file is still not a live switch in this build.
-            detail = "activation is not honored"
-    append_private_bytes(target / "logon.log", f"disabled {detail}\n".encode("utf-8"))
-    print(json.dumps({"detail": detail, "error": "disabled", "exit_code": 0, "ok": False}, sort_keys=True))
-    return 0
+    from free_claude_code.assignments.live import run_bounded, switches_live
+
+    if not switches_live(target, config):
+        append_private_bytes(target / "logon.log", b"disabled logon idle\n")
+        print(json.dumps({"detail": "logon idle", "error": "disabled", "exit_code": 0, "ok": False}, sort_keys=True))
+        return 0
+    return run_bounded(target, config)
 
 
 def main(argv: list[str] | None = None) -> int:

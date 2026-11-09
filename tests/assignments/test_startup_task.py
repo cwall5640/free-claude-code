@@ -108,17 +108,16 @@ def test_logon_stays_disabled_and_does_not_read_config(tmp_path: Path, monkeypat
         calls.append(enabled)
         return "healthy"
 
-    monkeypatch.setattr("free_claude_code.assignments.startup_task.ensure_fcc_proxy", fake_proxy)
+    monkeypatch.setattr("free_claude_code.assignments.live.ensure_fcc_proxy", fake_proxy)
     state = tmp_path / "state"
     assert candidate_main(["logon", "--root", str(state), "--config", str(config)]) == 0
     assert "logon idle" in (state / "logon.log").read_text(encoding="utf-8")
     assert calls == []
     assert secret.read_text(encoding="utf-8").startswith("github_publish=")
     (state / "enabled").write_text("true\n", encoding="utf-8")
-    (state / "ACTIVATION_APPROVED").write_text("x\n", encoding="utf-8")
     assert candidate_main(["logon", "--root", str(state), "--config", str(config)]) == 0
-    assert calls == [True]
-    assert "not honored" in (state / "logon.log").read_text(encoding="utf-8")
+    assert calls == []
+    assert "logon idle" in (state / "logon.log").read_text(encoding="utf-8")
 
 
 def test_wake_sets_on_ac_and_does_nothing_on_battery_or_posix() -> None:

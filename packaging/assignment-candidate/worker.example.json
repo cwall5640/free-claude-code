@@ -6,6 +6,7 @@
   "waiting_label": "waiting:claude1",
   "github_login": "claude1",
   "verdict_key_file": "",
+  "enabled": false,
   "slack_enabled": false,
   "slack_channel_id": "",
   "fcc_launcher": ""
