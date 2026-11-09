@@ -1,6 +1,68 @@
 # claude1 deployment handoff
 
-This file is a handoff for a later person or a smaller bot, including Minerva. It is enough to deploy `claude1`, `claude2`, or `claude3` on a new Windows machine. It does not turn anything on. Read section 7 before touching a machine. Stop at every step marked **Casey's OK**. Do not invent a missing command. If a command is not written here, it is not approved.
+## Handoff to Minerva (current state)
+
+Minerva takes over from Vibe Coder from here. This section is the current state. It does not turn the worker on. The checklist later in this file still uses `<user>` for a future machine. The paths in this section are the laptop paths already in use.
+
+### Done
+
+Steps 1 through 5 are done.
+
+- The three manager private keys are on the shared bot computer. See the evidence paths below. The laptop copy is public keys only.
+- The publisher token for claude1 exists and is stored as `github_publish` in the worker secret file. Do not print it.
+- The Slack app is `claude1`. Its only bot scope is `chat:write`. `slack_enabled` is false.
+- Casey's `/invite @claude1` to `#all-bot-army` is unconfirmed. Do not assume the bot is in the channel.
+
+### Step 6 is partial
+
+The worker is installed and disabled.
+
+- Install: `C:\Users\cwall\claude1-assignment-candidate`
+- Venv, a sibling of that install: `C:\Users\cwall\claude1-assignment-venv`
+- Source: `C:\Users\cwall\claude1-src-eeeca5c`
+
+There is no logon task yet. The power scheme is unchanged. Do not register the task before the pull request below is merged.
+
+### Pull request 5
+
+https://github.com/cwall5640/free-claude-code/pull/5 is open. It is not independently reviewed and it is not merged. Casey told Vibe Coder not to send it for review. Minerva decides whether to route it to an independent reviewer at the exact head. After that review, ask Casey before any merge. Do not merge it from this handoff.
+
+### After that merge
+
+Run `RegisterStartup` on the laptop. A reboot is not required. Then verify two things:
+
+- A disabled logon writes `disabled`, exits, and does not call GitHub, Slack, or the proxy.
+- Proxy auto-start is the enabled path only. It checks `http://127.0.0.1:8082/health` and, if needed, starts the existing Free Claude Code launcher. Do not flip `enabled` or `slack_enabled` to demonstrate that until step 7 has its own OK.
+
+### Still needs Casey's separate OK
+
+- Step 7: set the worker enabled and set `slack_enabled` true.
+- Step 8: one supervised test task.
+- Step 9: one announcement in `#all-bot-army`, sent as a draft until Casey says to post it.
+
+### Open reviewer Low findings
+
+No independent review was requested, so the pull request has no Low findings yet.
+
+### Open questions from pull request 5
+
+- `LeastPrivilege` stops the task from elevating. If the Windows user is already an administrator, the task still runs as that user.
+- The task name `claude1-assignment-worker` is only for claude1. claude2 and claude3 are not registered by this change.
+- The task time limit is 4 hours. The AC recheck is about every 30 seconds.
+- A disabled logon exits 0 so Task Scheduler does not record a failure. `run-once` and `Activate` still exit 2.
+- The real `schtasks` registration has not been run. Linux tests check the task XML and the wake helper with mocks.
+- This build still does not treat the activation file as a live switch. An enabled logon can ensure the proxy and then still logs that activation is not honored, without calling GitHub or Slack.
+- The default Free Claude Code launcher is `start-windows.ps1` in the original install. `fcc_launcher` in `worker.json` overrides it. An empty value means that default.
+
+### Evidence on the shared bot computer
+
+- `/workspace/fcc-claude1-deploy-step3-20261108`
+- the step 5 evidence in that same deploy set
+- step 6 `REPORT.md`
+- Manager keys: `/home/box/agent-data/claude1-manager-keys/`
+- Dossier: `/workspace/app-registry/projects/free-claude-code.md`
+
+This file is also the checklist for a later machine. It does not turn anything on. Read section 7 before touching a machine. Stop at every step marked **Casey's OK**. Do not invent a missing command. If a command is not written here, it is not approved.
 
 Package files that belong with this plan:
 
@@ -183,7 +245,7 @@ Rollback: revoke the Slack app token in Slack's settings and remove `slack_bot` 
 
 **Casey's OK** before `RegisterStartup`. Install still does not register a task.
 
-`RegisterStartup` registers one per-user task named `claude1-assignment-worker`. It runs at logon for the current user only, with `LeastPrivilege` and `InteractiveToken`. It is not SYSTEM, not an elevated task, and it does not run when the user is logged off. The command is the venv Python at `C:\Users\<user>\claude1-assignment-candidate\claude1-assignment-venv` and the config directory `C:\Users\<user>\claude1-worker-config`. The arguments are paths only. Running it again replaces that same task. `UnregisterStartup` deletes that task name and no other. Both commands are in `activation-rollback.json`.
+`RegisterStartup` registers one per-user task named `claude1-assignment-worker`. It runs at logon for the current user only, with `LeastPrivilege` and `InteractiveToken`. It is not SYSTEM, not an elevated task, and it does not run when the user is logged off. The command is the venv Python at `C:\Users\<user>\claude1-assignment-venv\Scripts\python.exe`. That venv is a sibling of `claude1-assignment-candidate`. `-Venv` overrides it and RegisterStartup exits 2 if `Scripts\python.exe` is missing. The config directory is `C:\Users\<user>\claude1-worker-config`. The arguments are paths only. When the worker is enabled it checks `http://127.0.0.1:8082/health`. If that is down it starts the existing launcher, by default `C:\Users\<user>\AppData\Local\Programs\FreeClaudeCode\start-windows.ps1`, detached, without the worker's publisher or Slack secrets and without editing that install. `fcc_launcher` in `worker.json` replaces that default. An empty `fcc_launcher` means the default. A disabled worker does not start the proxy. If health does not return 200 in time, the worker logs that and skips the task. Running it again replaces that same task. `UnregisterStartup` deletes that task name and no other. Both commands are in `activation-rollback.json`.
 
 Until a later activation build, the logon command logs `disabled` and exits. It does not read the secret file and it does not call GitHub or Slack. `run-once` and `Activate` still exit 2.
 

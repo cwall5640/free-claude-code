@@ -6,7 +6,8 @@ param(
     [string]$Mode = 'ShowContract',
     [string]$Root = '',
     [string]$Python = '',
-    [string]$SourceRoot = ''
+    [string]$SourceRoot = '',
+    [string]$Venv = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,14 +50,17 @@ if ($Mode -eq 'RegisterStartup') {
     }
     $profile = $env:USERPROFILE
     $install = Join-Path $profile 'claude1-assignment-candidate'
-    $venvPython = Join-Path $install 'claude1-assignment-venv\Scripts\python.exe'
+    if ($Venv -eq '') {
+        $Venv = Join-Path $profile 'claude1-assignment-venv'
+    }
+    $venvPython = Join-Path $Venv 'Scripts\python.exe'
     $state = Join-Path $install 'state'
     $config = Join-Path $profile 'claude1-worker-config'
-    foreach ($path in @($install, $venvPython, $config)) {
+    foreach ($path in @($install, $Venv, $venvPython, $config)) {
         Test-Reparse $path
     }
     if (-not (Test-Path -LiteralPath $venvPython)) {
-        Write-Output 'FAIL stage=register exit=2 error=venv python is missing'
+        Write-Output "FAIL stage=register exit=2 error=venv python is missing at $venvPython"
         exit 2
     }
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()

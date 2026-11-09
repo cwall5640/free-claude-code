@@ -26,6 +26,7 @@ class WorkerIdentity:
     verdict_key_file: Path | None = None
     slack_channel_id: str = ""
     slack_enabled: bool = False
+    fcc_launcher: str = ""
 
     def comment_suffix(self) -> str:
         return f"\n{self.comment_signature}\n"
@@ -70,6 +71,7 @@ def load_worker_identity(path: Path) -> WorkerIdentity:
         verdict_key_file=key_path,
         slack_channel_id=str(raw.get("slack_channel_id", "")).strip(),
         slack_enabled=_slack_enabled(raw),
+        fcc_launcher=str(raw.get("fcc_launcher", "")).strip(),
     )
     validate_worker_identity(identity)
     return identity
@@ -92,6 +94,16 @@ def validate_worker_identity(identity: WorkerIdentity) -> None:
         raise Forbidden("slack channel id must be one channel")
     if identity.slack_enabled and not identity.slack_channel_id:
         raise Forbidden("slack handoff needs the configured channel id")
+    if identity.fcc_launcher and not _launcher_is_absolute(identity.fcc_launcher):
+        raise Forbidden("fcc launcher must be an absolute path")
+    if "\n" in identity.fcc_launcher or "\r" in identity.fcc_launcher:
+        raise Forbidden("fcc launcher path is invalid")
+
+
+def _launcher_is_absolute(text: str) -> bool:
+    if text.startswith("/") or text.startswith("\\"):
+        return True
+    return len(text) >= 3 and text[1] == ":" and text[2] in "\\/"
 
 
 def _slack_enabled(raw: dict[str, object]) -> bool:

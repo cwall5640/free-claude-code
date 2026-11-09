@@ -15,6 +15,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from free_claude_code.assignments.errors import Forbidden
+from free_claude_code.assignments.fcc_proxy import ensure_fcc_proxy, launcher_from_worker_file
 from free_claude_code.assignments.private_io import append_private_bytes, ensure_private_dir
 
 TASK_NAME = "claude1-assignment-worker"
@@ -35,9 +36,11 @@ def install_layout(profile: Path) -> dict[str, Path]:
     """Paths for one Windows user. The profile is the only account-specific part."""
 
     install = profile / "claude1-assignment-candidate"
+    venv = profile / "claude1-assignment-venv"
     return {
         "install": install,
-        "python": install / "claude1-assignment-venv" / "Scripts" / "python.exe",
+        "venv": venv,
+        "python": venv / "Scripts" / "python.exe",
         "state": install / "state",
         "config": profile / "claude1-worker-config",
     }
@@ -127,7 +130,9 @@ def unregister_logon_task(*, task_name: str, delete) -> None:
 def logon_once(root: Path, config: Path | None = None) -> int:
     """Idle at sign-in until a later build honors activation.
 
-    This does not read the config directory and does not open a network client.
+    A disabled worker does not read worker.json and does not start the proxy.
+    An enabled worker may read fcc_launcher from worker.json and then ensure
+    the original proxy. It still does not call GitHub or Slack.
     """
 
     if config is not None and config.is_symlink():
@@ -136,13 +141,18 @@ def logon_once(root: Path, config: Path | None = None) -> int:
     _drop_secret_env()
     target = ensure_private_dir(root)
     enabled = target / "enabled"
-    approved = target / "ACTIVATION_APPROVED"
-    active = enabled.is_file() and enabled.read_text(encoding="utf-8").strip() == "true" and approved.is_file()
-    if active:
-        # This build still refuses activation. The flag is not a live switch.
-        detail = "activation is not honored"
-    else:
+    enabled_flag = enabled.is_file() and enabled.read_text(encoding="utf-8").strip() == "true"
+    if not enabled_flag:
         detail = "logon idle"
+    else:
+        profile = config.parent if config is not None else Path.home()
+        launcher = launcher_from_worker_file(config, profile)
+        proxy = ensure_fcc_proxy(enabled=True, launcher=launcher)
+        if proxy not in {"healthy", "started"}:
+            detail = "proxy down; skipping task"
+        else:
+            # The approval file is still not a live switch in this build.
+            detail = "activation is not honored"
     append_private_bytes(target / "logon.log", f"disabled {detail}\n".encode("utf-8"))
     print(json.dumps({"detail": detail, "error": "disabled", "exit_code": 0, "ok": False}, sort_keys=True))
     return 0

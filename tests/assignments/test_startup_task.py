@@ -23,7 +23,7 @@ from free_claude_code.assignments.wake import (
     hold_flags,
 )
 
-PYTHON = Path(r"C:\Users\alice\claude1-assignment-candidate\claude1-assignment-venv\Scripts\python.exe")
+PYTHON = Path(r"C:\Users\alice\claude1-assignment-venv\Scripts\python.exe")
 STATE = Path(r"C:\Users\alice\claude1-assignment-candidate\state")
 CONFIG = Path(r"C:\Users\alice\claude1-worker-config")
 USER = r"MACHINE\alice"
@@ -51,11 +51,11 @@ def test_logon_task_is_per_user_least_privilege() -> None:
     assert "github_publish" not in xml
     layout = install_layout(Path(r"C:\Users\alice"))
     assert layout["install"].name == "claude1-assignment-candidate"
-    assert layout["python"].name == "python.exe"
-    assert "claude1-assignment-venv" in layout["python"].parts
+    assert layout["venv"].name == "claude1-assignment-venv"
+    assert layout["venv"].parent == layout["install"].parent
+    assert layout["python"] == layout["venv"] / "Scripts" / "python.exe"
     assert layout["config"].name == "claude1-worker-config"
     assert layout["state"].name == "state"
-    assert layout["state"].parent.name == "claude1-assignment-candidate"
 
 
 def test_register_and_unregister_use_only_the_fixed_name() -> None:
@@ -102,13 +102,22 @@ def test_logon_stays_disabled_and_does_not_read_config(tmp_path: Path, monkeypat
     config.mkdir()
     secret = config / "secrets"
     secret.write_text("github_publish=not-a-real-token\n", encoding="utf-8")
+    calls: list[bool] = []
+
+    def fake_proxy(*, enabled: bool, launcher: Path, **_kwargs: object) -> str:
+        calls.append(enabled)
+        return "healthy"
+
+    monkeypatch.setattr("free_claude_code.assignments.startup_task.ensure_fcc_proxy", fake_proxy)
     state = tmp_path / "state"
     assert candidate_main(["logon", "--root", str(state), "--config", str(config)]) == 0
-    assert "disabled" in (state / "logon.log").read_text(encoding="utf-8")
+    assert "logon idle" in (state / "logon.log").read_text(encoding="utf-8")
+    assert calls == []
     assert secret.read_text(encoding="utf-8").startswith("github_publish=")
     (state / "enabled").write_text("true\n", encoding="utf-8")
     (state / "ACTIVATION_APPROVED").write_text("x\n", encoding="utf-8")
     assert candidate_main(["logon", "--root", str(state), "--config", str(config)]) == 0
+    assert calls == [True]
     assert "not honored" in (state / "logon.log").read_text(encoding="utf-8")
 
 
@@ -139,6 +148,8 @@ def test_launcher_records_the_task_and_leaves_install_disabled() -> None:
     assert "RegisterStartup" in script
     assert "UnregisterStartup" in script
     assert "claude1-assignment-worker" in script
+    assert "Join-Path $profile 'claude1-assignment-venv'" in script
+    assert "venv python is missing" in script
     assert "schtasks.exe /Create /TN $TaskName /XML $xmlPath /F" in script
     assert "schtasks.exe /Delete /TN $TaskName /F" in script
     assert "HIGHEST" not in script
