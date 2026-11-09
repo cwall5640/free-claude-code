@@ -5,6 +5,11 @@
   "logon_task_name": "claude1-assignment-worker",
   "register_startup": "powershell.exe -NoProfile -NonInteractive -File .\\Invoke-AssignmentCandidate.ps1 -Mode RegisterStartup -Python <venv>\\Scripts\\python.exe -SourceRoot <install>\\src",
   "unregister_startup": "powershell.exe -NoProfile -NonInteractive -File .\\Invoke-AssignmentCandidate.ps1 -Mode UnregisterStartup",
+  "activate": "powershell.exe -NoProfile -NonInteractive -File .\\Invoke-AssignmentCandidate.ps1 -Mode Activate -Root <state> -Python <venv>\\Scripts\\python.exe -SourceRoot <install>\\src -ApprovedBy <name> -ApprovalReference <reference>",
+  "deactivate": "powershell.exe -NoProfile -NonInteractive -File .\\Invoke-AssignmentCandidate.ps1 -Mode Deactivate -Root <state> -Python <venv>\\Scripts\\python.exe -SourceRoot <install>\\src -ApprovedBy <name>",
+  "approved_by": "",
+  "approved_at": "",
+  "approval_reference": "",
   "wake": "SetThreadExecutionState ES_CONTINUOUS|ES_SYSTEM_REQUIRED only while a task is running and the machine is on AC. Cleared when the task ends, on error, or on battery. The display stays off. powercfg is not called.",
   "do_not_run": [
     "do not register a sign-in task except Mode RegisterStartup for claude1-assignment-worker",

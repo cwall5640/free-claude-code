@@ -2,12 +2,15 @@
 # RegisterStartup is the explicit opt-in for one per-user logon task.
 # It does not change power settings or talk to GitHub.
 param(
-    [ValidateSet('ShowContract', 'Install', 'Activate', 'RunOnce', 'RegisterStartup', 'UnregisterStartup')]
+    [ValidateSet('ShowContract', 'Install', 'Activate', 'Deactivate', 'RunOnce', 'RegisterStartup', 'UnregisterStartup')]
     [string]$Mode = 'ShowContract',
     [string]$Root = '',
     [string]$Python = '',
     [string]$SourceRoot = '',
-    [string]$Venv = ''
+    [string]$Venv = '',
+    [string]$ConfigDir = '',
+    [string]$ApprovedBy = '',
+    [string]$ApprovalReference = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -96,9 +99,35 @@ if ($Mode -eq 'Install') {
     $code = Invoke-Candidate 'install-startup'
     exit $code
 }
-if ($Mode -eq 'Activate' -or $Mode -eq 'RunOnce') {
-    Write-Output 'FAIL stage=activation exit=2 error=startup installer is disabled'
-    exit 2
+if ($Mode -eq 'Activate') {
+    if ($Python -eq '' -or $SourceRoot -eq '' -or $ApprovedBy -eq '' -or $ApprovalReference -eq '') {
+        Write-Output 'FAIL stage=activation exit=2 error=ApprovedBy and ApprovalReference are required'
+        exit 2
+    }
+    $env:PYTHONPATH = $SourceRoot
+    & $Python -m free_claude_code.assignments.candidate activate --root $resolved --approved-by $ApprovedBy --approval-reference $ApprovalReference
+    exit $LASTEXITCODE
+}
+if ($Mode -eq 'Deactivate') {
+    if ($Python -eq '' -or $SourceRoot -eq '' -or $ApprovedBy -eq '') {
+        Write-Output 'FAIL stage=activation exit=2 error=ApprovedBy is required'
+        exit 2
+    }
+    $env:PYTHONPATH = $SourceRoot
+    & $Python -m free_claude_code.assignments.candidate deactivate --root $resolved --approved-by $ApprovedBy
+    exit $LASTEXITCODE
+}
+if ($Mode -eq 'RunOnce') {
+    if ($Python -eq '' -or $SourceRoot -eq '') {
+        Write-Output 'FAIL stage=preflight exit=2 error=Python and SourceRoot are required'
+        exit 2
+    }
+    if ($ConfigDir -eq '') {
+        $ConfigDir = Join-Path $env:USERPROFILE 'claude1-worker-config'
+    }
+    $env:PYTHONPATH = $SourceRoot
+    & $Python -m free_claude_code.assignments.candidate run-once --root $resolved --config $ConfigDir
+    exit $LASTEXITCODE
 }
 Write-Output 'FAIL stage=preflight exit=2 error=unknown mode'
 exit 2

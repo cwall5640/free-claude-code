@@ -6,33 +6,27 @@ Minerva takes over from Vibe Coder from here. This section is the current state.
 
 ### Done
 
-Steps 1 through 5 are done.
+Steps 1 through 6 are done.
 
 - The three manager private keys are on the shared bot computer. See the evidence paths below. The laptop copy is public keys only.
 - The publisher token for claude1 exists and is stored as `github_publish` in the worker secret file. Do not print it.
 - The Slack app is `claude1`. Its only bot scope is `chat:write`. `slack_enabled` is false.
 - Casey's `/invite @claude1` to `#all-bot-army` is unconfirmed. Do not assume the bot is in the channel.
-
-### Step 6 is partial
-
-The worker is installed and disabled.
-
-- Install: `C:\Users\cwall\claude1-assignment-candidate`
-- Venv, a sibling of that install: `C:\Users\cwall\claude1-assignment-venv`
-- Source: `C:\Users\cwall\claude1-src-eeeca5c`
-
-There is no logon task yet. The power scheme is unchanged. Do not register the task before the pull request below is merged.
+- Step 6 is complete. The worker is installed and disabled at `C:\Users\cwall\claude1-assignment-candidate`, with the venv at `C:\Users\cwall\claude1-assignment-venv` and the source at `C:\Users\cwall\claude1-src-eeeca5c`. The task `claude1-assignment-worker` is registered from `main` `5c2a006cd970c01bc6ef9a326580cdce9ab7bc52`. A disabled logon was verified: exit 0, and the log said `disabled logon idle`. The power scheme is unchanged.
 
 ### Pull request 5
 
-https://github.com/cwall5640/free-claude-code/pull/5 is open. It is not independently reviewed and it is not merged. Casey told Vibe Coder not to send it for review. Minerva decides whether to route it to an independent reviewer at the exact head. After that review, ask Casey before any merge. Do not merge it from this handoff.
+Pull request 5 is merged. `main` for the registered logon task is `5c2a006cd970c01bc6ef9a326580cdce9ab7bc52`.
+
+### Activation pull request
+
+Branch `cursor/claude1-activation` is the build that honors the enabled switch. Cody reviews it. It is not merged by this document. Minerva sends the exact head to Cody, then asks Casey before any merge. Do not set `worker.json` `enabled` to true and do not run `Activate` on the laptop until that merge has Casey's OK.
 
 ### After that merge
 
-Run `RegisterStartup` on the laptop. A reboot is not required. Then verify two things:
+`RegisterStartup` is already done from `main` `5c2a006cd970c01bc6ef9a326580cdce9ab7bc52`. No reboot was required. The disabled logon check passed: exit 0, log text `disabled logon idle`, and it did not call GitHub, Slack, or the proxy.
 
-- A disabled logon writes `disabled`, exits, and does not call GitHub, Slack, or the proxy.
-- Proxy auto-start is the enabled path only. It checks `http://127.0.0.1:8082/health` and, if needed, starts the existing Free Claude Code launcher. Do not flip `enabled` or `slack_enabled` to demonstrate that until step 7 has its own OK.
+Proxy auto-start is the enabled path only. It checks `http://127.0.0.1:8082/health` and, if needed, starts the existing Free Claude Code launcher. Do not flip `enabled` or `slack_enabled` to demonstrate that until step 7 has its own OK.
 
 ### Still needs Casey's separate OK
 
@@ -50,8 +44,8 @@ No independent review was requested, so the pull request has no Low findings yet
 - The task name `claude1-assignment-worker` is only for claude1. claude2 and claude3 are not registered by this change.
 - The task time limit is 4 hours. The AC recheck is about every 30 seconds.
 - A disabled logon exits 0 so Task Scheduler does not record a failure. `run-once` and `Activate` still exit 2.
-- The real `schtasks` registration has not been run. Linux tests check the task XML and the wake helper with mocks.
-- This build still does not treat the activation file as a live switch. An enabled logon can ensure the proxy and then still logs that activation is not honored, without calling GitHub or Slack.
+- The laptop task `claude1-assignment-worker` is registered from `main` `5c2a006cd970c01bc6ef9a326580cdce9ab7bc52`, and the disabled logon returned exit 0 with `disabled logon idle`. Linux tests still mock Task Scheduler and the wake helper. The activation pull request has not been registered as a replacement task.
+- The activation build is live only when `worker.json` has `enabled` true and `Activate` has recorded `approved_by`, `approved_at`, and `approval_reference`. Either switch alone stays off. `Deactivate` flips the record back. `slack_enabled` stays false until step 7.
 - The default Free Claude Code launcher is `start-windows.ps1` in the original install. `fcc_launcher` in `worker.json` overrides it. An empty value means that default.
 
 ### Evidence on the shared bot computer
@@ -247,7 +241,7 @@ Rollback: revoke the Slack app token in Slack's settings and remove `slack_bot` 
 
 `RegisterStartup` registers one per-user task named `claude1-assignment-worker`. It runs at logon for the current user only, with `LeastPrivilege` and `InteractiveToken`. It is not SYSTEM, not an elevated task, and it does not run when the user is logged off. The command is the venv Python at `C:\Users\<user>\claude1-assignment-venv\Scripts\python.exe`. That venv is a sibling of `claude1-assignment-candidate`. `-Venv` overrides it and RegisterStartup exits 2 if `Scripts\python.exe` is missing. The config directory is `C:\Users\<user>\claude1-worker-config`. The arguments are paths only. When the worker is enabled it checks `http://127.0.0.1:8082/health`. If that is down it starts the existing launcher, by default `C:\Users\<user>\AppData\Local\Programs\FreeClaudeCode\start-windows.ps1`, detached, without the worker's publisher or Slack secrets and without editing that install. `fcc_launcher` in `worker.json` replaces that default. An empty `fcc_launcher` means the default. A disabled worker does not start the proxy. If health does not return 200 in time, the worker logs that and skips the task. Running it again replaces that same task. `UnregisterStartup` deletes that task name and no other. Both commands are in `activation-rollback.json`.
 
-Until a later activation build, the logon command logs `disabled` and exits. It does not read the secret file and it does not call GitHub or Slack. `run-once` and `Activate` still exit 2.
+Without both live switches, logon still logs `disabled` and exits 0. It does not read the secret file and it does not call GitHub, Slack, or the proxy. `run-once` exits 2. `Activate` without `-ApprovedBy` and `-ApprovalReference` exits 2.
 
 While a real task is running, and only while the machine is on AC power, the worker calls `SetThreadExecutionState` with `ES_CONTINUOUS|ES_SYSTEM_REQUIRED`. It clears that request when the task ends, on an error, or when the cord is unplugged. It re-checks AC power about every 30 seconds. It does not keep the display on and it does not call `powercfg` or change the power plan. On Linux the wake call does nothing.
 
@@ -267,23 +261,34 @@ Rollback: delete only that scratch directory. See `activation-rollback.json`.
 
 ### Step 7. Flip the live switch
 
-Who approves: Casey, after steps 1 through 6.
+**Casey's OK** after Cody's review of the activation pull request is merged. Two switches are both required. Either one alone stays off.
 
-The entry point `python -m free_claude_code.assignments.candidate run-once` still exits 2. There is no hidden flag in this package that makes it live. Flipping the switch means a later reviewed change that Casey has approved, then setting the candidate `enabled` flag and `slack_enabled` in the private identity file. Do not flip either flag while `run-once` still returns 2.
+1. In `worker.json`, set `enabled` to true. Leave `slack_enabled` false until Casey's separate OK for Slack.
+2. Run `Activate` with `-ApprovedBy` and `-ApprovalReference`. That writes `activation-rollback.json` in the state directory with `executed` true, `approved_by`, `approved_at`, and `approval_reference`. The copy in git stays unexecuted.
 
-Verify: one read of the contract still shows the hard rules. A process list shows no new listener until that later build is the one Casey approved.
+```text
+powershell.exe -NoProfile -NonInteractive -File .\Invoke-AssignmentCandidate.ps1 -Mode Activate -Root C:\Users\<user>\claude1-assignment-candidate\state -Python C:\Users\<user>\claude1-assignment-venv\Scripts\python.exe -SourceRoot C:\Users\<user>\claude1-assignment-candidate\src -ApprovedBy Casey -ApprovalReference <reference>
+```
 
-Rollback: set `enabled` and `slack_enabled` back to false. Do not unregister Inkbound or the original Free Claude Code server.
+Logon or `RunOnce` then polls at a 30 second interval, at most 20 passes. A file named `KILL` in the state directory stops it. Discovery is only `waiting:claude1` or a signed `NEXT: claude1` comment that names the pull request's current head SHA and verifies against the pinned manager keys. The worker claims the task, uses `claude1/<task-id>`, publishes through the publisher, and posts a signed HANDOFF comment. It never pushes `main`, never force-pushes, and never merges. Repair attempts stop at 2. Wake runs only on AC power. Slack is posted only when `slack_enabled` is true. A bad key, a claim conflict, or a replayed handoff exits immediately.
+
+Verify: with either switch off, logon still logs `disabled` and `run-once` exits 2. With both on, one supervised pass matches step 8. Do not leave `KILL` absent on a machine you are not watching.
+
+Rollback: `Deactivate` with `-ApprovedBy`, and set `enabled` back to false. Do not unregister Inkbound or the original Free Claude Code server.
+
+```text
+powershell.exe -NoProfile -NonInteractive -File .\Invoke-AssignmentCandidate.ps1 -Mode Deactivate -Root C:\Users\<user>\claude1-assignment-candidate\state -Python C:\Users\<user>\claude1-assignment-venv\Scripts\python.exe -SourceRoot C:\Users\<user>\claude1-assignment-candidate\src -ApprovedBy Casey
+```
 
 ### Step 8. One supervised test task
 
-Who approves: Casey names the repository, the issue, and the manager. One task only.
+**Casey's OK.** Casey names the repository, the issue, and the manager. One task only. Do this only after step 7 is on.
 
-Use a disposable working directory. Do not use the original Free Claude Code home. The assigning manager signs the assignment. claude1 may open a feature branch and a pull request. A human reviews it. Nobody merges it in this step unless Casey gives a separate merge OK, and claude1 still does not merge.
+Use a disposable working directory. Do not use the original Free Claude Code home. The assigning manager signs the assignment. claude1 may open a feature branch and a pull request. Cody or another independent reviewer reviews it. Nobody merges it in this step unless Casey gives a separate merge OK, and claude1 still does not merge.
 
-Verify: the branch is `claude1/<task-id>`, the pull request is not targeting a push of `main`, the comment ends with `— dev:claude1`, the head SHA in the comment matches the live head, and repair attempts are at most two. CI, if any, is the approved local runner only.
+Verify: the branch is `claude1/<task-id>`, the pull request does not push `main`, the comment ends with `— dev:claude1`, the head SHA in the comment matches the live head, repair attempts are at most two, and Slack was not posted while `slack_enabled` is false. CI, if any, is the approved local runner only.
 
-Rollback: close the pull request without merging. Delete the feature branch only if Casey says to. Do not reset `main`.
+Rollback: `Deactivate`, set `enabled` false, and close the pull request without merging. Delete the feature branch only if Casey says to. Do not reset `main`.
 
 ### Step 9. Announce in #all-bot-army
 

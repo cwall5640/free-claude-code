@@ -83,7 +83,7 @@ CAPABILITY_BOUNDARY = {
     "startup_installer": "writes_disabled_plan_only",
     "logon_task": "opt_in_per_user_least_privilege_not_registered_by_install",
     "wake": "ac_only_system_required_no_display_no_powercfg",
-    "activation": "disabled",
+    "activation": "live_only_when_worker_json_and_activation_record",
     "network_git_push": "disabled_until_publisher_enabled_one_https_origin",
     "manager_set": "config_file_of_pinned_public_keys",
     "manager_attestation": "one_signature_covers_execute_and_publish",
