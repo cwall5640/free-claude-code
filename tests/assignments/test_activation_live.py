@@ -223,3 +223,69 @@ def _arm(
     (config / "runtime.json").write_text(json.dumps(runtime), encoding="utf-8")
     activate(state, "Casey", "casey-activation")
     _write_inbox(state / "inbox", _attestation(sha, expires=2_000_000_000))
+
+
+def test_malformed_activation_record_stays_disabled(tmp_path: Path) -> None:
+    root = tmp_path / "state"
+    root.mkdir()
+    (root / "activation-rollback.json").write_text("{not-json", encoding="utf-8")
+    assert is_activated(root) is False
+    assert candidate_main(
+        ["activate", "--root", str(root), "--approved-by", "Casey", "--approval-reference", "record"]
+    ) == 2
+
+
+def test_malformed_worker_config_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_proxy(**_kwargs: object) -> str:
+        raise AssertionError("proxy must not run with malformed worker config")
+
+    monkeypatch.setattr("free_claude_code.assignments.live.ensure_fcc_proxy", no_proxy)
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "worker.json").write_text("{broken", encoding="utf-8")
+    state = tmp_path / "state"
+    assert candidate_main(["logon", "--root", str(state), "--config", str(config)]) == 0
+    assert candidate_main(["run-once", "--root", str(state), "--config", str(config)]) == 2
+
+
+def test_malformed_runtime_rejected_before_proxy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_proxy(**_kwargs: object) -> str:
+        raise AssertionError("proxy must not run with malformed runtime")
+
+    monkeypatch.setattr("free_claude_code.assignments.live.ensure_fcc_proxy", no_proxy)
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "worker.json").write_text(json.dumps(_worker(enabled=True)), encoding="utf-8")
+    (config / "runtime.json").write_text("{broken", encoding="utf-8")
+    state = tmp_path / "state"
+    activate(state, "Casey", "record")
+    assert candidate_main(["run-once", "--root", str(state), "--config", str(config)]) == 2
+
+
+def test_kill_is_cooperative_not_mid_task_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from free_claude_code.assignments import live
+
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "worker.json").write_text(json.dumps(_worker(enabled=True)), encoding="utf-8")
+    (config / "runtime.json").write_text(
+        json.dumps({"poll_limit": 2, "poll_interval_seconds": 0}), encoding="utf-8"
+    )
+    state = tmp_path / "state"
+    activate(state, "Casey", "record")
+    monkeypatch.setattr(live, "ensure_fcc_proxy", lambda **_kwargs: "healthy")
+    monkeypatch.setattr(live, "launcher_from_worker_file", lambda *_args: None)
+    monkeypatch.setattr(live, "_runtime", lambda *_args: {"poll_limit": 2, "poll_interval_seconds": 0})
+
+    calls = []
+
+    class Candidate:
+        def run_once(self):
+            calls.append("ran")
+            (state / "KILL").write_text("stop", encoding="utf-8")
+            return {"status": "idle"}
+
+    monkeypatch.setattr(live, "_candidate", lambda *_args: Candidate())
+    assert live.run_bounded(state, config) == 0
+    assert calls == ["ran"]
+    assert "kill switch after active task" in (state / "logon.log").read_text(encoding="utf-8")
