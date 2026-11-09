@@ -132,7 +132,15 @@ Who approves: Casey, and each manager who will hold a private key.
 
 Generate one Ed25519 key pair per manager on a machine that manager controls. Pin only the public key into the manager config. The example file is `packaging/assignment-candidate/managers.example.json`. Copy it to a private config path that is not committed. Replace every example public key. The example keys in git are placeholders. They are not the live keys.
 
-The worker verifies public keys. It has no function that signs a manager assignment. Do not put a private key in the worker tree, in git, in Slack, or in a prompt.
+The worker verifies public keys. It has no function that signs a manager assignment, and it does not import the manager signer. Do not put a private key in the worker tree, in git, in Slack, or in a prompt.
+
+A manager signs on the manager machine. The private key stays in a file. The documented path is `/home/box/agent-data/claude1-manager-keys/<principal>/ed25519.private`. That file is raw 32 bytes, mode `0600` on POSIX, or current-user-only on Windows. The command reads the path and prints the signed attestation. It does not print the key.
+
+```text
+python -m free_claude_code.assignments.manager_sign --key-file /home/box/agent-data/claude1-manager-keys/vibe-coder/ed25519.private --principal vibe-coder --role vibe --audience <worker-audience> --repo <owner>/<name> --issue <N> --issue-node-id <node> --base-branch <branch> --base-sha <40 hex> --updated-at <timestamp> --task-id <lowercase-task-id> --nonce <unique> --expires-at <unix> --decision assign
+```
+
+`<worker-audience>` is the audience configured for that worker. It must not be the principal id. Project Manager uses `--role project_manager` and `--principal project-manager`. Minerva uses `--role project_manager` and `--principal minerva`. The same command with `--next-actor claude1 --head <40 hex pull head>` prints a signed NEXT comment instead of the attestation. The worker still cannot run this module.
 
 Fields that matter: `principal_id`, `role` (`vibe` or `project_manager`), `display_name`, `github_login`, `handoff_actor`, and `public_key_hex`. Do not set `interim_until` on Vibe Coder, Project Manager, or Minerva. Map Vibe Coder's handoff actor to Casey (`waiting:casey`), Project Manager to Grok (`waiting:grok`), and Minerva to Minerva (`waiting:minerva`). Those labels are the legal set in `handoff-actors.example.json`, plus a `claudeN` worker.
 

@@ -1001,7 +1001,7 @@ def test_secret_file_symlink_scrub_and_model_env(tmp_path: Path) -> None:
     assert VIBE_PUBLIC.hex() not in repr(verifier)
     assert not hasattr(verifier, "sign")
     for module in Path("src/free_claude_code/assignments").glob("*.py"):
-        if module.name == "verdict_sign.py":
+        if module.name in {"verdict_sign.py", "manager_sign.py"}:
             continue
         text = module.read_text(encoding="utf-8")
         assert "Ed25519PrivateKey" not in text
