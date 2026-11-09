@@ -191,6 +191,9 @@ def _candidate(state: Path, config: Path, runtime: dict[str, object]) -> Assignm
         reviewer_id=str(runtime["reviewer_id"]),
         allowed_command=tuple(runtime["allowed_command"]),
         command_cwd=str(runtime["command_cwd"]),
+        allowed_path_prefixes=tuple(
+            str(prefix) for prefix in runtime.get("allowed_path_prefixes", ["src"])
+        ),
         repair_limit=REPAIR_LIMIT,
         identity=identity,
     )

@@ -132,8 +132,6 @@ class TaskManifest:
             raise Forbidden("repository execution is not available")
         if self.bypass_native_approvals:
             raise Forbidden("native machine approvals cannot be bypassed")
-        if self.base_branch in _FORBIDDEN_BRANCHES:
-            raise Forbidden("refusing a protected branch as the recorded base")
 
     @property
     def manifest_id(self) -> str:
@@ -193,8 +191,6 @@ class PublicationPlan:
             raise Forbidden("auto-merge and direct push are not available")
         if self.head_branch in _FORBIDDEN_BRANCHES:
             raise Forbidden("refusing a protected head branch")
-        if self.base_branch in _FORBIDDEN_BRANCHES:
-            raise Forbidden("refusing to target a protected branch")
         if self.reviewer_id and self.reviewer_id == self.author_id:
             raise Forbidden("reviewer must be distinct from the author")
 
