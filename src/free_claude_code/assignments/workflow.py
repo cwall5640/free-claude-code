@@ -81,6 +81,8 @@ CAPABILITY_BOUNDARY = {
     "dev_label_family": "refused",
     "live_listener": "disabled",
     "startup_installer": "writes_disabled_plan_only",
+    "logon_task": "opt_in_per_user_least_privilege_not_registered_by_install",
+    "wake": "ac_only_system_required_no_display_no_powercfg",
     "activation": "disabled",
     "network_git_push": "disabled_until_publisher_enabled_one_https_origin",
     "manager_set": "config_file_of_pinned_public_keys",
@@ -314,7 +316,10 @@ def bounded_awake(probe: FilesystemMachineProbe, *, max_seconds: float) -> Itera
     started = time.monotonic()
     if admit_machine(probe.read()) != "admit":
         raise Disabled("machine is not signed in, active, plugged in, and online")
-    yield
+    from free_claude_code.assignments.wake import PluggedInWake
+
+    with PluggedInWake():
+        yield
     if time.monotonic() - started > max_seconds:
         raise Disabled("awake window elapsed")
     if admit_machine(probe.read()) != "admit":

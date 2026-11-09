@@ -2,8 +2,12 @@
   "executed": false,
   "activation_enabled": false,
   "startup_installed": false,
+  "logon_task_name": "claude1-assignment-worker",
+  "register_startup": "powershell.exe -NoProfile -NonInteractive -File .\\Invoke-AssignmentCandidate.ps1 -Mode RegisterStartup -Python <venv>\\Scripts\\python.exe -SourceRoot <install>\\src",
+  "unregister_startup": "powershell.exe -NoProfile -NonInteractive -File .\\Invoke-AssignmentCandidate.ps1 -Mode UnregisterStartup",
+  "wake": "SetThreadExecutionState ES_CONTINUOUS|ES_SYSTEM_REQUIRED only while a task is running and the machine is on AC. Cleared when the task ends, on error, or on battery. The display stays off. powercfg is not called.",
   "do_not_run": [
-    "do not register a Windows sign-in task",
+    "do not register a sign-in task except Mode RegisterStartup for claude1-assignment-worker",
     "do not change power or sleep settings",
     "do not register a runner",
     "do not set the candidate enabled flag",
@@ -11,6 +15,7 @@
     "do not push to a network git remote"
   ],
   "rollback_if_a_later_approval_installs_it": [
+    "UnregisterStartup deletes only the task named claude1-assignment-worker",
     "delete only the disposable root passed to Install",
     "leave the original Free Claude Code install, Inkbound runners, and the pilot repository untouched"
   ]

@@ -22,6 +22,14 @@ def main(argv: list[str] | None = None) -> int:
     if command == "run-once":
         print('{"ok": false, "error": "disabled", "exit_code": 2, "detail": "run-once is not activated"}')
         return 2
+    if command == "logon":
+        if root is None:
+            print('{"ok": false, "error": "disabled", "exit_code": 2, "detail": "logon requires a state directory"}')
+            return 2
+        from free_claude_code.assignments.startup_task import logon_once
+
+        config = Path(args[args.index("--config") + 1]) if "--config" in args else None
+        return logon_once(root, config)
     return candidate_command(command, root)
 
 
