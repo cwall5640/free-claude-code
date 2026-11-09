@@ -699,7 +699,7 @@ def test_real_repair_loop_commits_any_allowlisted_edit_and_opens_pr(tmp_path: Pa
     git_remote = GitHttps(tmp_path / "git-remote", PUBLISH)
     try:
         candidate = _candidate(
-            tmp_path, api, sha, _script(tmp_path, fail_until=3), publish=git_remote, interim="2026-11-11"
+            tmp_path, api, sha, _script(tmp_path, fail_until=3), publish=git_remote
         )
         result = _run_published(candidate, git_remote)
     finally:
@@ -719,7 +719,7 @@ def test_real_repair_loop_commits_any_allowlisted_edit_and_opens_pr(tmp_path: Pa
     assert not any("/reviews" in path for path, _auth in api.posts)
     posted = _posted_texts(api)
     assert any("SIGNED BY: vibe-1 (Vibe Coder)" in body for body in posted)
-    assert any("INTERIM UNTIL: 2026-11-11" in body for body in posted)
+    assert all("INTERIM UNTIL:" not in body for body in posted)
     assert any(body.rstrip().endswith("— dev:claude1") for body in posted)
     shown = _git(tmp_path / "run" / "workspace", "show", f"{result['head_sha']}:src/widget.py")
     assert "return value * factor" in shown
@@ -1143,7 +1143,7 @@ def test_routing_comments_self_review_and_manager_config(tmp_path: Path) -> None
     assert_reviewer_is_not_author(author_login="Minerva", reviewer_login=ACTOR_BARE)
     example = load_manager_config(Path("packaging/assignment-candidate/managers.example.json"))
     assert [item.principal_id for item in example] == ["vibe-coder", "project-manager", "minerva"]
-    assert example[2].interim_until == "2026-11-11"
+    assert [item.interim_until for item in example] == ["", "", ""]
     for module in ("workflow.py", "managers.py", "ed25519_verify.py", "verdict.py"):
         assert "Minerva" not in Path("src/free_claude_code/assignments", module).read_text(encoding="utf-8")
     kept_secret, kept_public = new_key()
@@ -1171,7 +1171,6 @@ def test_routing_comments_self_review_and_manager_config(tmp_path: Path) -> None
                 "display_name": "Minerva",
                 "github_login": "Minerva",
                 "public_key_hex": removed_public.hex(),
-                "interim_until": "2026-11-11",
             },
         ]
     }
@@ -1443,11 +1442,87 @@ def test_handoff_actor_interim_and_pull_head(tmp_path: Path) -> None:
     sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
     before = int(datetime(2026, 11, 11, 15, tzinfo=timezone.utc).timestamp())
     after = int(datetime(2026, 11, 12, tzinfo=timezone.utc).timestamp())
-    valid = _verifier(tmp_path / "before", now=before, interim="2026-11-11")
-    _check(valid, _attestation(sha, nonce="during", expires=2_000_000_000))
-    expired = _verifier(tmp_path / "after", now=after, interim="2026-11-11")
+    interim_secret, interim_public = new_key()
+    valid = _verifier(
+        tmp_path / "before",
+        interim_public,
+        now=before,
+        principal="synthetic-interim",
+        role="project_manager",
+        name="Synthetic Interim",
+        interim="2026-11-11",
+    )
+    during = _attestation(
+        sha,
+        secret=interim_secret,
+        principal_id="synthetic-interim",
+        role="project_manager",
+        nonce="during",
+        expires=2_000_000_000,
+    )
+    _check(valid, during)
+    expired = _verifier(
+        tmp_path / "after",
+        interim_public,
+        now=after,
+        principal="synthetic-interim",
+        role="project_manager",
+        name="Synthetic Interim",
+        interim="2026-11-11",
+    )
     with pytest.raises(ApprovalInvalid, match="interim_until"):
-        _check(expired, _attestation(sha, nonce="later", expires=2_000_000_000))
+        _check(
+            expired,
+            _attestation(
+                sha,
+                secret=interim_secret,
+                principal_id="synthetic-interim",
+                role="project_manager",
+                nonce="later",
+                expires=2_000_000_000,
+            ),
+        )
+    api = FixtureApi(sha)
+    try:
+        url = api.start_url()
+        slot = tmp_path / "synthetic-handoff"
+        state = slot / "state"
+        power, session, network = _sensors(slot)
+        secrets = slot / "secrets" / "values"
+        prepare_secret_file(secrets, PUBLISH)
+        posted = AssignmentCandidate(
+            enabled=True,
+            owner="cwall5640",
+            repo="fixture",
+            api=GitHubHttpClient(url, "read-token", timeout=5),
+            paths=CandidatePaths(
+                state_dir=state,
+                source_repo=tmp_path / "origin",
+                workspace=slot / "workspace",
+                secrets_file=secrets,
+                inbox=slot / "inbox",
+                power_file=power,
+                session_file=session,
+                network_file=network,
+                local_remote=slot / "bare.git",
+            ),
+            verifier=valid,
+            operator_id="operator",
+            reviewer_id="reviewer",
+            allowed_command=(sys.executable, str(_ok_script(tmp_path))),
+            command_cwd="src",
+        )
+        posted._post_handoff(
+            9,
+            "https://github.com/cwall5640/fixture/pull/9",
+            sha,
+            during,
+            "PASS",
+        )
+    finally:
+        api.stop()
+    assert any("INTERIM UNTIL: 2026-11-11" in body for body in api.bodies)
+    assert any("SIGNED BY: synthetic-interim (Synthetic Interim)" in body for body in api.bodies)
     api = FixtureApi(sha)
     api.labels = []
     api.has_pull = True

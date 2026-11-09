@@ -2,7 +2,10 @@
 """Load the assigning-manager set. Names are data, not code.
 
 Each entry is one identity and its pinned Ed25519 public key. Adding or
-removing a manager is a change to this file. This module cannot sign.
+removing a manager is a change to this file. ``interim_until`` is optional.
+The example set leaves it unset, so those managers do not expire. When a
+future entry sets the field, the worker rejects that key after that UTC day.
+This module cannot sign.
 """
 
 import json

@@ -40,7 +40,7 @@ Hard rules, all of them:
 - Every GitHub comment ends with `— dev:claude1`. A verdict (PASS, READY, or HOLD) counts only in a signed comment that names the pull request's current head SHA.
 - The Slack line, when posted, is only this shape: `HANDOFF: <task-id> | <PR URL> | <head SHA> | <PASS/HOLD/INCOMPLETE/STALE> | NEXT: <actor>`. PASS means the step is done. It does not mean approved.
 - claude1 is a reviewer of record. A signed PASS at the current head can satisfy independent review, including on a Minerva pull request, because claude1 is not Minerva. claude1 never reviews a pull request it authored or pushed.
-- Assigning managers are a config file, not hard-coded names. The example set is Vibe Coder, Project Manager (Grok), and Minerva. Minerva is interim. Her example entry has `interim_until` of `2026-11-11`. After that UTC day the software rejects her key. Grok does not become PM again by the calendar. Casey has to say so, and someone then edits the config. Deleting Minerva's object removes her. That is a config change, not a code change.
+- Assigning managers are a config file, not hard-coded names. Casey decided on 2026-11-09 that the three permanent managers are Vibe Coder, Project Manager (Grok), and Minerva. None of them has `interim_until`. Minerva's key does not expire. Project Manager stays a manager. The software still honors `interim_until` on some other entry and rejects that key after that UTC day. The example file does not set the field. Removing a manager is deleting that object from the config. That is a config change, not a code change.
 - Slack uses claude1's own Slack app. The only bot scope is `chat:write`. The only channel is `#all-bot-army`. It never posts as Casey and it never uses a user token.
 
 Board rows and labels are claims. Before acting, read the live pull request head from the GitHub API.
@@ -68,7 +68,7 @@ Head history that matters, oldest first:
 | `e16b1e01` | Test-only. On Windows, `claims.json` privacy uses the ACL helper instead of POSIX mode bits. |
 | `a598ec0d` | Deployment plan only. No production change. |
 
-Confirm the pull request head on GitHub before you treat any SHA above as current. The state-file ACL fix is the commit after `a598ec0d`.
+Confirm the pull request head on GitHub before you treat any SHA above as current. The state-file ACL fix is `5324223058e533852effdfef67e94d86c5979c46`. The permanent-manager decision follows that commit: Vibe Coder, Project Manager, and Minerva have no `interim_until`.
 
 Native Windows checks on the laptop, disposable directories only. The original Free Claude Code install was not the test target.
 
@@ -134,9 +134,9 @@ Generate one Ed25519 key pair per manager on a machine that manager controls. Pi
 
 The worker verifies public keys. It has no function that signs a manager assignment. Do not put a private key in the worker tree, in git, in Slack, or in a prompt.
 
-Fields that matter: `principal_id`, `role` (`vibe` or `project_manager`), `display_name`, `github_login`, `handoff_actor`, `public_key_hex`, and for Minerva `interim_until`. Map Vibe Coder's handoff actor to Casey (`waiting:casey`), Project Manager to Grok (`waiting:grok`), and Minerva to Minerva (`waiting:minerva`). Those labels are the legal set in `handoff-actors.example.json`, plus a `claudeN` worker.
+Fields that matter: `principal_id`, `role` (`vibe` or `project_manager`), `display_name`, `github_login`, `handoff_actor`, and `public_key_hex`. Do not set `interim_until` on Vibe Coder, Project Manager, or Minerva. Map Vibe Coder's handoff actor to Casey (`waiting:casey`), Project Manager to Grok (`waiting:grok`), and Minerva to Minerva (`waiting:minerva`). Those labels are the legal set in `handoff-actors.example.json`, plus a `claudeN` worker.
 
-Verify: a signature from a pinned key is accepted, a removed key is rejected, and a Minerva signature is rejected when the worker clock is after `2026-11-11` UTC. Use a disposable clock in a test. Do not change the laptop clock.
+Verify: a signature from each pinned key is accepted, and a removed key is rejected. A synthetic entry that sets `interim_until` is rejected when the worker clock is after that UTC day. Use a disposable clock in a test. Do not change the laptop clock, and do not put an expiry on the three permanent managers.
 
 Rollback: remove that manager's object from the private config and restart nothing until Casey says the file is correct. Delete any private key file that was written in the wrong place. Do not commit the replacement file if it contains a private key.
 
