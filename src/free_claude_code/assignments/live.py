@@ -10,11 +10,12 @@ import time
 from pathlib import Path
 
 from free_claude_code.assignments.activation import is_activated
-from free_claude_code.assignments.errors import ApprovalInvalid, Conflict, Forbidden
+from free_claude_code.assignments.errors import ApprovalInvalid, Conflict, Forbidden, ScopeError
 from free_claude_code.assignments.fcc_proxy import ensure_fcc_proxy, launcher_from_worker_file
 from free_claude_code.assignments.github_http import GitHubHttpClient
 from free_claude_code.assignments.identity import load_worker_identity
 from free_claude_code.assignments.managers import load_manager_config
+from free_claude_code.assignments.models import validate_prefixes
 from free_claude_code.assignments.private_io import append_private_bytes, ensure_private_dir
 from free_claude_code.assignments.secrets import load_secret_file
 from free_claude_code.assignments.workflow import (
@@ -121,6 +122,13 @@ def _runtime(config: Path) -> dict[str, object]:
     if not owner or not repo or owner == repo:
         raise Forbidden("runtime repository is missing")
     operator = str(raw.get("operator_id", "")).strip()
+    prefixes = raw.get("allowed_path_prefixes", ["src"])
+    if not isinstance(prefixes, list) or not prefixes or not all(isinstance(prefix, str) for prefix in prefixes):
+        raise Forbidden("runtime allowed path prefixes must be a nonempty list of strings")
+    try:
+        allowed_path_prefixes = validate_prefixes(tuple(prefixes))
+    except ScopeError as exc:
+        raise Forbidden("runtime allowed path prefixes are unsafe") from exc
     reviewer = str(raw.get("reviewer_id", "")).strip()
     if not operator or not reviewer or operator == reviewer:
         raise Forbidden("publication needs an independent reviewer")
@@ -132,6 +140,7 @@ def _runtime(config: Path) -> dict[str, object]:
         raise Forbidden("poll interval is out of bounds")
     return {
         "allowed_command": tuple(command),
+        "allowed_path_prefixes": allowed_path_prefixes,
         "audience": str(raw.get("audience", "")).strip(),
         "ca_file": str(raw.get("ca_file", "")).strip(),
         "command_cwd": str(raw.get("command_cwd", "src")).strip() or "src",
@@ -191,6 +200,7 @@ def _candidate(state: Path, config: Path, runtime: dict[str, object]) -> Assignm
         reviewer_id=str(runtime["reviewer_id"]),
         allowed_command=tuple(runtime["allowed_command"]),
         command_cwd=str(runtime["command_cwd"]),
+        allowed_path_prefixes=tuple(runtime["allowed_path_prefixes"]),
         repair_limit=REPAIR_LIMIT,
         identity=identity,
     )

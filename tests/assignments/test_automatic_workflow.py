@@ -110,7 +110,7 @@ class FixtureApi(threading.Thread):
                 if "/issues/" in path and number is not None and outer.serves_issue(number):
                     self._json(outer.issue_payload(number))
                     return
-                if path.endswith("/branches/dev"):
+                if path.endswith("/branches/dev") or path.endswith("/branches/main"):
                     self._json({"commit": {"sha": outer.sha}})
                     return
                 if path.endswith("/fixture") or path.rsplit("/", 1)[-1] == "fixture":
@@ -430,19 +430,19 @@ def _git(cwd: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-def _origin(tmp: Path) -> tuple[Path, str]:
+def _origin(tmp: Path, *, branch: str = "dev", topdir: str = "src") -> tuple[Path, str]:
     origin = tmp / "origin"
-    (origin / "src").mkdir(parents=True)
-    (origin / "src" / "widget.py").write_bytes(b"def add(left, right):\n    return 0\n")
-    (origin / "src" / "test_widget.py").write_text(
+    (origin / topdir).mkdir(parents=True)
+    (origin / topdir / "widget.py").write_bytes(b"def add(left, right):\n    return 0\n")
+    (origin / topdir / "test_widget.py").write_text(
         "import unittest\nfrom widget import add\n\n"
         "class T(unittest.TestCase):\n"
         "    def test_add(self):\n"
         "        self.assertEqual(add(1, 1), 2)\n",
         encoding="utf-8",
     )
-    _git(origin, "-c", "core.autocrlf=false", "init", "-b", "dev")
-    _git(origin, "add", "src")
+    _git(origin, "-c", "core.autocrlf=false", "init", "-b", branch)
+    _git(origin, "add", topdir)
     _git(origin, "commit", "-m", "base")
     return origin, _git(origin, "rev-parse", "HEAD")
 
@@ -576,6 +576,9 @@ def _candidate(
     interim: str = "",
     identity: WorkerIdentity | None = None,
     issue_number: int = 9,
+    allowed_path_prefixes: tuple[str, ...] = ("src",),
+    attestation_overrides: dict[str, object] | None = None,
+    command_cwd: str = "src",
 ) -> AssignmentCandidate:
     url = api.start_url()
     slot = tmp / name
@@ -593,6 +596,7 @@ def _candidate(
             sha,
             issue_number=issue_number,
             issue_node_id=f"NODE{issue_number}",
+            **(attestation_overrides or {}),
         ),
         issue_number,
     )
@@ -616,7 +620,8 @@ def _candidate(
         operator_id="operator",
         reviewer_id="reviewer",
         allowed_command=(sys.executable, str(script)),
-        command_cwd="src",
+        command_cwd=command_cwd,
+        allowed_path_prefixes=allowed_path_prefixes,
         identity=worker,
     )
     if publish is not None:
@@ -1727,3 +1732,62 @@ def test_windows_powershell_show_contract(tmp_path: Path) -> None:
     assert loaded.returncode == 0
     assert "activation" in loaded.stdout
     assert "disabled" in loaded.stdout
+
+
+def test_service_allows_attested_main_base_and_configured_prefixes(tmp_path: Path) -> None:
+    """Regression for free-claude-code #11: the candidate's manifest service
+    refused an attested base branch of main and ignored configured prefixes."""
+    from free_claude_code.assignments.paths import path_allowed
+
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    try:
+        candidate = _candidate(
+            tmp_path,
+            api,
+            sha,
+            _ok_script(tmp_path),
+            allowed_path_prefixes=("changes", ".gitignore"),
+        )
+        service = candidate._service(9, "main")
+    finally:
+        api.stop()
+    entry = service._allow("cwall5640", "fixture", 9)
+    assert entry.base_branch == "main"
+    assert service.config.allowed_path_prefixes == ("changes", ".gitignore")
+    assert path_allowed(".gitignore", service.config.allowed_path_prefixes)
+    assert path_allowed("changes/CLAUDE1-TEST-02.md", service.config.allowed_path_prefixes)
+    assert not path_allowed("src/widget.py", service.config.allowed_path_prefixes)
+
+
+def test_run_once_with_main_base_and_configured_prefixes(tmp_path: Path) -> None:
+    """End to end on a main-based repo whose work lives outside src/."""
+    _origin(tmp_path, branch="main", topdir="changes")
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    git_remote = GitHttps(tmp_path / "git-remote", PUBLISH)
+    try:
+        candidate = _candidate(
+            tmp_path,
+            api,
+            sha,
+            _script(tmp_path, fail_until=1),
+            publish=git_remote,
+            allowed_path_prefixes=("changes",),
+            attestation_overrides={"base_branch": "main"},
+            command_cwd="changes",
+        )
+        result = _run_published(candidate, git_remote)
+    finally:
+        api.stop()
+        git_remote.stop()
+    assert result["status"] == "returned_for_review"
+    assert result["merged"] is False
+    assert result["branch"] == "claude1/fix-add"
+    shown = _git(
+        tmp_path / "run" / "workspace",
+        "show",
+        f"{result['head_sha']}:changes/widget.py",
+    )
+    assert "return value * factor" in shown

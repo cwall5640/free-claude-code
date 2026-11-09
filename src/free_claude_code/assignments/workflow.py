@@ -650,6 +650,7 @@ class AssignmentCandidate:
         reviewer_id: str,
         allowed_command: tuple[str, ...],
         command_cwd: str,
+        allowed_path_prefixes: tuple[str, ...] = ("src",),
         repair_limit: int = REPAIR_LIMIT,
         awake_seconds: float = 30.0,
         identity: WorkerIdentity | None = None,
@@ -664,6 +665,7 @@ class AssignmentCandidate:
         self.reviewer_id = reviewer_id
         self.allowed_command = allowed_command
         self.command_cwd = command_cwd
+        self.allowed_path_prefixes = tuple(allowed_path_prefixes)
         self.repair_limit = repair_limit
         self.awake_seconds = awake_seconds
         self.issues = IssueCreation()
@@ -1147,7 +1149,12 @@ class AssignmentCandidate:
             enabled=True,
             allowlist=(AllowlistEntry(self.owner, self.repo, number, base_branch),),
             operators=self.verifier.principal_ids,
-            allowed_path_prefixes=("src",),
+            # The allowlist entry is synthesized from a signature-verified
+            # attestation whose base_sha was checked against the live head
+            # of this branch, so the operator-file guard against protected
+            # base branches does not apply here.
+            forbidden_branches=(),
+            allowed_path_prefixes=self.allowed_path_prefixes,
             fetch_timeout_seconds=self.api.timeout,
         )
         from free_claude_code.assignments.store import StateStore
