@@ -34,11 +34,10 @@ function Invoke-Candidate([string]$Command) {
 }
 
 if ($Mode -eq 'ShowContract') {
-    if ($Python -eq '' -or $SourceRoot -eq '') {
-        Write-Output 'OK stage=show-contract exit=0 activation=disabled'
-        exit 0
-    }
     $code = Invoke-Candidate 'show-contract'
+    if ($code -ne 0) {
+        Write-Output "FAIL stage=show-contract exit=$code error=contract was not loaded"
+    }
     exit $code
 }
 if ($Mode -eq 'Install') {

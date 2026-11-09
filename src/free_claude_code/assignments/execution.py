@@ -39,6 +39,8 @@ _SECRET_ENV = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "GH_ENTERPRISE_TOKEN",
+    "FCC_PUBLISH_TOKEN",
+    "FCC_ASKPASS_FILE",
 )
 _NEVER_COMMANDS = frozenset(
     {"gh", "git", "bash", "sh", "pwsh", "powershell", "cmd", "curl", "wget", "ssh"}
@@ -228,6 +230,17 @@ class GitWorkspace:
             raise Forbidden("HEAD is not the approved commit")
         return head
 
+    def materialize_detached(self, source: Path, sha: str) -> str:
+        """Clone and detach at one SHA. This does not create or push a branch."""
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._run(("clone", "--local", str(source), str(self.path)), cwd=self.path.parent)
+        self._run(("checkout", "--detach", sha), cwd=self.path)
+        head = self.head()
+        if head != sha:
+            raise Forbidden("checkout did not land on the requested SHA")
+        return head
+
     def head(self) -> str:
         return self._run(("rev-parse", "HEAD"), cwd=self.path).strip()
 
@@ -236,6 +249,18 @@ class GitWorkspace:
         if name in {"", "HEAD", "main", "master"}:
             raise Forbidden("checked out branch is missing or protected")
         return name
+
+    def changed_paths(self) -> tuple[str, ...]:
+        text = self._run(("status", "--porcelain"), cwd=self.path)
+        found: list[str] = []
+        for line in text.splitlines():
+            if len(line) < 4:
+                continue
+            path = line[3:].strip()
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1]
+            found.append(path_ok(path))
+        return tuple(dict.fromkeys(found))
 
     def ancestry_contains(self, ancestor: str, descendant: str) -> bool:
         result = self._run(
@@ -287,7 +312,8 @@ class GitWorkspace:
             raise Forbidden(f"git {args[0]} failed: {detail}")
         if args[:2] == ("merge-base", "--is-ancestor"):
             return "" if completed.returncode == 0 else "no"
-        return completed.stdout.strip()
+        # Keep a leading space. `git status --porcelain` uses it for the staged column.
+        return completed.stdout.rstrip("\r\n")
 
 
 def path_ok(relative: str) -> str:

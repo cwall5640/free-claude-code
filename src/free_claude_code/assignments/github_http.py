@@ -83,6 +83,54 @@ class GitHubHttpClient:
                 numbers.append(item["number"])
         return tuple(numbers)
 
+    def list_issue_comments(self, owner: str, repo: str, number: int, *, timeout: float) -> tuple[dict, ...]:
+        raw = self._bytes(
+            "GET",
+            f"/repos/{_seg(owner)}/{_seg(repo)}/issues/{number}/comments",
+            timeout=timeout,
+        )
+        loaded = json.loads(raw.decode("utf-8"))
+        if not isinstance(loaded, list):
+            raise Forbidden("issue comments were not a list")
+        return tuple(item for item in loaded if isinstance(item, dict))
+
+    def fetch_pull(self, owner: str, repo: str, number: int, *, timeout: float) -> dict:
+        payload = self._json(
+            "GET", f"/repos/{_seg(owner)}/{_seg(repo)}/pulls/{number}", timeout=timeout
+        )
+        return payload
+
+    def replace_waiting_label(
+        self, owner: str, repo: str, number: int, *, remove: str, add: str, timeout: float
+    ) -> None:
+        if remove.startswith(("dev:", "status:")) or add.startswith(("dev:", "status:")):
+            raise Forbidden("refusing to create or search a dev or status label")
+        if not add.startswith("waiting:"):
+            raise Forbidden("the next holder label must be a waiting label")
+        self._bytes(
+            "DELETE",
+            f"/repos/{_seg(owner)}/{_seg(repo)}/issues/{number}/labels/{quote(remove, safe='')}",
+            timeout=timeout,
+        )
+        self._json(
+            "POST",
+            f"/repos/{_seg(owner)}/{_seg(repo)}/issues/{number}/labels",
+            timeout=timeout,
+            body={"labels": [add]},
+        )
+
+    def post_issue_comment(
+        self, owner: str, repo: str, number: int, body: str, *, timeout: float
+    ) -> None:
+        if "/reviews" in body:
+            raise Forbidden("a verdict comment is not a merge approval")
+        self._json(
+            "POST",
+            f"/repos/{_seg(owner)}/{_seg(repo)}/issues/{number}/comments",
+            timeout=timeout,
+            body={"body": body},
+        )
+
     def fetch_branch_sha(
         self, owner: str, repo: str, branch: str, *, timeout: float
     ) -> str:
