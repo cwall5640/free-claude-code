@@ -1,6 +1,6 @@
 # claude1 deployment handoff
 
-This file is a handoff for a later person or a smaller bot. It does not turn anything on. Read it, then stop at every step that says Casey must approve. Do not invent a missing command. If a command is not written here, it is not approved.
+This file is a handoff for a later person or a smaller bot, including Minerva. It is enough to deploy `claude1`, `claude2`, or `claude3` on a new Windows machine. It does not turn anything on. Read section 7 before touching a machine. Stop at every step marked **Casey's OK**. Do not invent a missing command. If a command is not written here, it is not approved.
 
 Package files that belong with this plan:
 
@@ -49,8 +49,15 @@ Board rows and labels are claims. Before acting, read the live pull request head
 
 Repository: `https://github.com/cwall5640/free-claude-code`
 
-- Pull request 1 is the upstream import. It was still unmerged when this plan was written. Its imported base commit is `61e5d7d50acd61345a25e77c66dd3acc795b3716`.
-- Pull request 2 is the assignment worker. Its git base is the branch `cursor/import-upstream-main-66df`. It is not merged.
+What happened on 2026-11-09:
+
+- Pull request 2 merged into pull request 1. Pull request 1 was the import branch `cursor/import-upstream-main-66df`.
+- Before pull request 1 merged to `main`, the hosted-runner workflows were removed: `.github/workflows/post-merge.yml` (push to `main` on hosted Ubuntu, Windows, and macOS, plus a PyPI publish) and `.github/workflows/validate-bug-report-version.yml` (hosted Ubuntu on new or edited issues). That removal is commit `a2fff668f578b336543325a92bf37e00aad58afc`. There is no paid CI on `main`.
+- `.github/dependabot.yml` was left in place. Do not delete it without **Casey's OK**.
+- Pull request 1 then merged to `main`. The merge commit is `f74f1392dd32a196688c7b705b6022e8af7c945b`.
+- The worker is still disabled. `activation-rollback.json` has `"executed": false`. Nothing has been activated or posted by this worker.
+
+`main` at `f74f1392` does not yet contain the manager signing command. That command is the change that carries this plan. Clone `main` for a new machine only after that change is on `main`. Until then, stop. Merging it needs **Casey's OK**. claude1 does not merge.
 
 Head history that matters, oldest first:
 
@@ -82,7 +89,7 @@ Native Windows checks on the laptop, disposable directories only. The original F
 
 `e16b1e01` only changed the test. Run 5 showed the production gap: claims, and the same write path for the other state files, never called `harden_path`. The following commit hardens every state write (claims, queue, locks, integrity keys, nonces, startup plan, service journal, status, approvals, handoff artifacts, grant files, Slack `posted.txt`, and the publisher askpass token). The temp file is hardened before `os.replace`, and the destination is hardened after. POSIX mode is `0o600` for files and `0o700` for state directories.
 
-Linux rerun of that fix, Python 3.14.10: 41 passed, 3 skipped. The three skips are still the Windows-only DACL, junction, and PowerShell tests. The new state-file privacy test ran on Linux and checked mode bits. The Windows secret script printed `windows_acl_execution=unrun` and `symlink_rejection=VALIDATED`. Nobody has rerun native Windows pytest on the ACL fix yet. Do that before merge. Do not call the Linux run a Windows pass.
+Linux rerun of that fix, Python 3.14.10: 41 passed, 3 skipped. The three skips are still the Windows-only DACL, junction, and PowerShell tests. The new state-file privacy test ran on Linux and checked mode bits. The Windows secret script printed `windows_acl_execution=unrun` and `symlink_rejection=VALIDATED`. The merge to `main` did not include a later native Windows pass of the ACL fix. A new machine must pass the validation in section 7 before it is trusted. Do not call a Linux run a Windows pass.
 
 Linux command used for the counts above:
 
@@ -96,8 +103,6 @@ Separate Linux secret script: 3 tests OK.
 PYTHONPATH=src python3.14 tests/assignments/run_windows_secret_tests.py
 ```
 
-Everything in this package is still disabled. `activation-rollback.json` has `"executed": false`. Nothing has been activated, posted, or merged by this worker.
-
 ## 3. Deployment steps
 
 Do these in order. Each gated step needs Casey's explicit OK before it starts. A chat message that is not that OK is not approval.
@@ -106,59 +111,61 @@ Rollback for every step that touches a disposable directory: follow `activation-
 
 ### Step 1. Final review of one exact head
 
-Who approves: an independent reviewer, then Casey.
-
-Command: on GitHub, open pull request 2 and read the head SHA. It must be the SHA you intend to ship. Do not review an older SHA from this document if the pull request has moved.
-
-Verify: the review comment is signed, names that exact head SHA, and says what was and was not run. A Windows rerun of the state-file ACL fix (the commit after `a598ec0d`) is still required. Record pass, fail, and skip counts.
-
-Rollback: do not merge. Leave the pull request open.
+Status: done for the import. Pull request 2 was reviewed and merged into pull request 1. A new machine still runs the native validation in section 7. That validation is not a merge.
 
 ### Step 2. Merge pull request 2, and decide pull request 1
 
-Who approves: Casey. Merging is a human action. claude1 does not merge.
+Status: done. Pull request 2 merged into pull request 1. Pull request 1 merged to `main` at `f74f1392dd32a196688c7b705b6022e8af7c945b` after the hosted workflows were removed. Dependabot remains. Later merges still need **Casey's OK**. claude1 does not merge.
 
-Pull request 2 merges into `cursor/import-upstream-main-66df` only after step 1 passes on that exact head. Do not push or merge `main` as part of this.
-
-Pull request 1 is the upstream import. Merging it to `main` is a separate decision. Casey has not made that decision in the sources for this plan. Do not merge pull request 1 just because pull request 2 merged. Do not change the default branch.
-
-Verify: pull request 2 shows merged, and `main` is unchanged unless Casey separately approved a `main` merge.
-
-Rollback: use GitHub's revert of the merge commit Casey identifies. Do not force-push. Do not delete the branch until Casey says so.
+Rollback, if Casey asks: revert the merge commit Casey names. Do not force-push. Do not delete a branch until Casey says so.
 
 ### Step 3. Manager keys
 
-Who approves: Casey, and each manager who will hold a private key.
+Status: done for the first three managers. **Casey's OK** is required before adding another principal or copying a private key anywhere else.
 
-Generate one Ed25519 key pair per manager on a machine that manager controls. Pin only the public key into the manager config. The example file is `packaging/assignment-candidate/managers.example.json`. Copy it to a private config path that is not committed. Replace every example public key. The example keys in git are placeholders. They are not the live keys.
+The three private keys are on the shared bot computer, one directory per principal:
 
-The worker verifies public keys. It has no function that signs a manager assignment, and it does not import the manager signer. Do not put a private key in the worker tree, in git, in Slack, or in a prompt.
+- `/home/box/agent-data/claude1-manager-keys/vibe-coder/ed25519.private`
+- `/home/box/agent-data/claude1-manager-keys/project-manager/ed25519.private`
+- `/home/box/agent-data/claude1-manager-keys/minerva/ed25519.private`
 
-A manager signs on the manager machine. The private key stays in a file. The documented path is `/home/box/agent-data/claude1-manager-keys/<principal>/ed25519.private`. That file is raw 32 bytes, mode `0600` on POSIX, or current-user-only on Windows. The command reads the path and prints the signed attestation. It does not print the key.
+Each directory is mode `0700`. Each private file is raw 32 bytes and mode `0600`. The principals are Vibe Coder (`vibe`, handoff actor Casey), Project Manager (`project_manager`, handoff actor Grok), and Minerva (`project_manager`, handoff actor Minerva). None of them has `interim_until`.
+
+Caveat: those three keys share one computer. They are not on three separate manager machines. A person or bot that can read that computer can use all three keys. Do not describe this as separate custody. Do not copy a private key to a laptop, into git, into Slack, or into a prompt.
+
+The laptop has only the public keys, staged at `C:\Users\<user>\claude1-worker-config\managers.json`. That file is public keys only. Its ACL is current-user-only. The example file `packaging/assignment-candidate/managers.example.json` is a shape, not the live keys. Do not commit the staged file.
+
+The worker verifies public keys. It does not import the manager signer. A manager signs on the bot computer:
 
 ```text
-python -m free_claude_code.assignments.manager_sign --key-file /home/box/agent-data/claude1-manager-keys/vibe-coder/ed25519.private --principal vibe-coder --role vibe --audience <worker-audience> --repo <owner>/<name> --issue <N> --issue-node-id <node> --base-branch <branch> --base-sha <40 hex> --updated-at <timestamp> --task-id <lowercase-task-id> --nonce <unique> --expires-at <unix> --decision assign
+python -m free_claude_code.assignments.manager_sign --key-file /home/box/agent-data/claude1-manager-keys/<principal>/ed25519.private --principal <principal> --role <vibe|project_manager> --audience <worker-audience> --repo <owner>/<name> --issue <N> --issue-node-id <node> --base-branch <branch> --base-sha <40 hex> --updated-at <timestamp> --task-id <lowercase-task-id> --nonce <unique> --expires-at <unix> --decision assign
 ```
 
-`<worker-audience>` is the audience configured for that worker. It must not be the principal id. Project Manager uses `--role project_manager` and `--principal project-manager`. Minerva uses `--role project_manager` and `--principal minerva`. The same command with `--next-actor claude1 --head <40 hex pull head>` prints a signed NEXT comment instead of the attestation. The worker still cannot run this module.
+`<worker-audience>` is the audience configured for that worker. It must not be the principal id. Vibe Coder uses `--role vibe` and `--principal vibe-coder`. Project Manager uses `--role project_manager` and `--principal project-manager`. Minerva uses `--role project_manager` and `--principal minerva`. Add `--next-actor claude1 --head <40 hex pull head>` to print a signed NEXT comment instead of the attestation. For claude2 or claude3, use that bare name as `--next-actor` only after the label step in section 7. The worker and the model process must not run this module.
 
-Fields that matter: `principal_id`, `role` (`vibe` or `project_manager`), `display_name`, `github_login`, `handoff_actor`, and `public_key_hex`. Do not set `interim_until` on Vibe Coder, Project Manager, or Minerva. Map Vibe Coder's handoff actor to Casey (`waiting:casey`), Project Manager to Grok (`waiting:grok`), and Minerva to Minerva (`waiting:minerva`). Those labels are the legal set in `handoff-actors.example.json`, plus a `claudeN` worker.
+Verify: a signature from each pinned public key is accepted, and a removed key is rejected. Do not print the private file.
 
-Verify: a signature from each pinned key is accepted, and a removed key is rejected. A synthetic entry that sets `interim_until` is rejected when the worker clock is after that UTC day. Use a disposable clock in a test. Do not change the laptop clock, and do not put an expiry on the three permanent managers.
-
-Rollback: remove that manager's object from the private config and restart nothing until Casey says the file is correct. Delete any private key file that was written in the wrong place. Do not commit the replacement file if it contains a private key.
+Rollback: remove that manager's object from `managers.json` on the laptop. Leave the private key in place until Casey says to delete that one file. Do not commit either file.
 
 ### Step 4. Publisher GitHub access
 
-Who approves: Casey. This decision is still open.
+**Casey's OK** for every token. One token per worker. Do not reuse Casey's token and do not reuse another worker's token.
 
-The publisher reads a secret named `github_publish` from the private secret file. It pushes only `claude1/<task-id>` to `https://github.com/<owner>/<repo>.git`. It refuses `main`, `master`, force pushes, and tags. The token is not an argument and not visible to the model or the tests.
+Casey creates a fine-grained personal access token in GitHub's settings:
 
-Open decision, do not close it yourself: which existing GitHub credential, if any, may be placed in `github_publish`. Do not create a new personal access token. Do not expand scopes. Do not assume a repo-admin login is allowed to merge just because it can push. A login that can merge is a bad publisher credential unless Casey explicitly accepts that risk in writing.
+- Token name: `claude1-publisher`, `claude2-publisher`, or `claude3-publisher`, matching that worker.
+- Expiration: 90 days.
+- Repository access: only selected repositories. Not all repositories.
+- Permissions: Contents read and write, Pull requests read and write. Every other permission is none.
+- Casey puts the token into the secure secret form. Never paste it into chat, a prompt, a log, or git.
 
-Verify: with the publisher still disabled, confirm the secret file is mode-private on Linux or ACL-private on Windows, the value is not in the environment, and a refused push (main, force, tag, wrong host) fails closed. Do not push to a live repository during this check unless Casey named that one push.
+Store it on that worker's laptop as the name `github_publish` in the worker secret file next to the public manager file: `C:\Users\<user>\claude1-worker-config\` holds `managers.json` and the secret file beside it. The secret file ACL is current-user-only. The publisher reads `github_publish` from that file. It pushes only `claudeN/<task-id>` to `https://github.com/<owner>/<repo>.git`. It refuses `main`, `master`, force pushes, and tags. The token is not an argument and is not visible to the model or the tests.
 
-Rollback: delete the `github_publish` line from the secret file. Leave other secrets in place. Do not print the file.
+Also ask Casey to turn on a `main` branch rule that requires a pull request review before merge. The token can push a feature branch and open a pull request. The branch rule is what stops that token from merging to `main`. Do not skip the rule because the worker also refuses to push `main`.
+
+Verify: the publisher is still disabled. The secret file is current-user-only. The value is not in the environment. A refused push (`main`, force, tag, or wrong host) fails closed. Do not push to a live repository during this check unless Casey named that one push. Do not print the file.
+
+Rollback: delete the `github_publish` line from the secret file and revoke that token in GitHub. Leave other secrets in place. Do not print the file.
 
 ### Step 5. claude1 Slack app
 
@@ -258,9 +265,31 @@ Before and after any disposable test, check the original proxy with a read-only 
 
 ## 6. Safety
 
-- Casey's explicit OK is required before merge, key pinning, publisher credentials, Slack token storage, startup registration, power changes, enabling the worker, the live test task, and the announcement.
+- Casey's explicit OK is required before a new-machine install, a publisher token, Slack token storage, a new `waiting:claudeN` label, startup registration, power changes, enabling the worker, the live test task, the announcement, and any later merge.
+- A publisher token arrives through the secure secret form. Never through chat.
 - Never retry a denied approval or a security refusal.
 - Never print, log, paste, or commit a token, a private key, a secret file, or the contents of the original Free Claude Code home.
 - Never commit `slack_bot`, `github_publish`, or a private Ed25519 key.
 - POSIX `chmod` is not proof of privacy on Windows. Use the DACL check.
 - If you do not know the command, stop. Do not guess a scheduled-task command, a merge command, or a new token.
+
+## 7. New machine checklist
+
+Do these in order for each new Windows machine. The laptop account is `<user>`. Write the real account only on that machine. `N` is `1`, `2`, or `3`.
+
+1. **Casey's OK.** Name the machine and the worker (`claude1`, `claude2`, or `claude3`). Do not use an Inkbound machine. Do not reuse the pilot runner directory.
+2. **Casey's OK** before the first Free Claude Code install on that machine. Use the free-claude-code-nvidia-setup flow. In plain terms: install Free Claude Code for that Windows user, point it at NVIDIA NIM, bind the proxy to `127.0.0.1:8082` only, and select model `nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b`. Provider keys stay inside that install. Do not copy them into the worker config and do not print them. If an install already exists at `C:\Users\<user>\AppData\Local\Programs\FreeClaudeCode`, leave it. Check `http://127.0.0.1:8082` returns 200. Do not send a model prompt.
+3. **Casey's OK** for the Python install if it is not the already reviewed Python 3.14. Make a disposable virtual environment for the validation run. Do not install the candidate into the Free Claude Code virtual environment.
+4. Clone `https://github.com/cwall5640/free-claude-code.git` and check out `main` only after this plan is on `main`. Record the SHA. Confirm `.github/workflows/post-merge.yml` and `.github/workflows/validate-bug-report-version.yml` are absent. Leave `.github/dependabot.yml` unless Casey says otherwise.
+5. Native validation must pass before any later step. From the clone, with the disposable virtual environment:
+   ```text
+   python -m pytest tests/assignments/test_automatic_workflow.py tests/assignments/test_slack_poster.py tests/assignments/test_assignment_sandbox.py tests/assignments/test_http_adapters.py --noconftest -o addopts=''
+   python tests/assignments/run_windows_secret_tests.py
+   ```
+   Also run `tests/assignments/test_manager_sign_cli.py` when that file is in the clone. Then the manual checks in `windows/RUNBOOK.md`, using a new empty directory that is not the Free Claude Code install: ShowContract exits 0 with Python and SourceRoot set, ShowContract exits 2 without them, Install exits 0 with `enabled` false and `registered_with_os` false, Activate exits 2, RunOnce exits 2, no new scheduled task, the power scheme is unchanged, and the disposable root's ACL is current-user-only. The secret script must be 3/3 OK. The proxy still returns 200. A failure stops the checklist. This step does not enable the worker.
+6. Write that machine's identity file from `worker.example.json`. Set `actor_name` to `dev:claudeN`, `bare_name` and `branch_prefix` to `claudeN`, `comment_signature` to `— dev:claudeN`, `waiting_label` to `waiting:claudeN`, and `github_login` to that worker's publisher account. Create a new verdict key file for this worker only, current-user-only, and put its path in `verdict_key_file`. Leave `slack_enabled` false and `slack_channel_id` empty until checklist item 9. Do not commit this file.
+7. Reuse the same pinned public `managers.json` from deployment step 3. Copy the public file, not the private keys. The private keys stay on the shared bot computer.
+8. **Casey's OK.** Create this worker's publisher token as in deployment step 4. Store `github_publish` in the secret file next to `managers.json`, with a current-user-only ACL. Use the secure secret form. Never chat.
+9. **Casey's OK.** Create this worker's Slack app as in deployment step 5. One app, named `claudeN`, scope `chat:write` only, invited only to `#all-bot-army`, token stored as `slack_bot` in that same secret file. Leave `slack_enabled` false.
+10. **Casey's OK** before any new `waiting:claudeN` label. `waiting:claude1` is already in the PM-BRIEFING. `waiting:claude2` and `waiting:claude3` need a PM-BRIEFING update that Casey approves before the label is created. Do not create the label first.
+11. **Casey's OK** before startup registration, power changes, `enabled` true, `slack_enabled` true, the supervised test task, or the `#all-bot-army` announcement. Those are deployment steps 6 through 9 in section 3. The package still refuses `run-once` with exit 2. Do not invent a switch.
