@@ -733,8 +733,13 @@ def test_real_repair_loop_commits_any_allowlisted_edit_and_opens_pr(tmp_path: Pa
     events = (tmp_path / "run" / "state" / "service" / "events.jsonl").read_text(encoding="utf-8")
     assert '"operator_id": "vibe-1"' in events
     assert '"operator_id": "operator"' not in events
-    mode = (tmp_path / "run" / "state" / "claims" / "claims.json").stat().st_mode
-    assert mode & 0o077 == 0
+    claims = tmp_path / "run" / "state" / "claims" / "claims.json"
+    if sys.platform == "win32":
+        from free_claude_code.assignments.windows_acl import file_is_current_user_only
+
+        assert file_is_current_user_only(claims)
+    else:
+        assert claims.stat().st_mode & 0o077 == 0
 
 
 def test_missing_label_forged_expired_revoked_replay_and_wrong_repo(tmp_path: Path) -> None:
