@@ -70,6 +70,10 @@ def run_bounded(root: Path, config: Path, *, sleep=time.sleep) -> int:
             except (ApprovalInvalid, Forbidden, Conflict) as exc:
                 _log(state, f"fail closed {exc.code}")
                 return 2
+            # KILL is cooperative: active subprocess work is not interrupted.
+            if _killed(state):
+                _log(state, "kill switch after active task")
+                return 0
             if result.get("merged") is True:
                 _log(state, "merge refused")
                 return 2
@@ -87,7 +91,10 @@ def _worker_enabled(config: Path) -> bool:
     worker = config / "worker.json"
     if not worker.is_file() or worker.is_symlink():
         return False
-    raw = json.loads(worker.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(worker.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeError, OSError):
+        return False
     if not isinstance(raw, dict):
         return False
     flag = raw.get("enabled", False)
@@ -100,7 +107,10 @@ def _runtime(config: Path) -> dict[str, object]:
     path = config / "runtime.json"
     if not path.is_file() or path.is_symlink():
         raise Forbidden("runtime config is missing")
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeError, OSError) as exc:
+        raise Forbidden("runtime config is unreadable or malformed") from exc
     if not isinstance(raw, dict):
         raise Forbidden("runtime config is not an object")
     command = raw.get("allowed_command")
