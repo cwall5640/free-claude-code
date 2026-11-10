@@ -579,6 +579,7 @@ def _candidate(
     allowed_path_prefixes: tuple[str, ...] = ("src",),
     attestation_overrides: dict[str, object] | None = None,
     command_cwd: str = "src",
+    setup_command: tuple[str, ...] | None = None,
 ) -> AssignmentCandidate:
     url = api.start_url()
     slot = tmp / name
@@ -622,6 +623,7 @@ def _candidate(
         allowed_command=(sys.executable, str(script)),
         command_cwd=command_cwd,
         allowed_path_prefixes=allowed_path_prefixes,
+        setup_command=setup_command,
         identity=worker,
     )
     if publish is not None:
@@ -1811,3 +1813,181 @@ def test_run_once_enforces_configured_command_timeout(tmp_path: Path) -> None:
             candidate.run_once()
     finally:
         api.stop()
+
+
+def _setup_marker_script(tmp: Path) -> Path:
+    path = tmp / "setup-marker.py"
+    path.write_text(
+        "\n".join(
+            [
+                "import pathlib",
+                "pathlib.Path('setup-ran.txt').write_text('ok')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _setup_fail_script(tmp: Path) -> Path:
+    path = tmp / "setup-fail.py"
+    path.write_text("raise SystemExit(3)\n", encoding="utf-8")
+    return path
+
+
+def _gated_script(tmp: Path) -> Path:
+    path = tmp / "gated-check.py"
+    path.write_text(
+        "\n".join(
+            [
+                "import pathlib",
+                "count = pathlib.Path('attempts.txt')",
+                "n = int(count.read_text()) + 1 if count.exists() else 1",
+                "count.write_text(str(n))",
+                "if not pathlib.Path('setup-ran.txt').exists():",
+                "    raise SystemExit(1)",
+                "pathlib.Path('widget.py').write_text(",
+                "    'def scale(value, factor):\\n    return value * factor\\n',",
+                "    encoding='utf-8')",
+                "raise SystemExit(0)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_setup_command_runs_before_the_check(tmp_path: Path) -> None:
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    git_remote = GitHttps(tmp_path / "git-remote", PUBLISH)
+    try:
+        candidate = _candidate(
+            tmp_path,
+            api,
+            sha,
+            _gated_script(tmp_path),
+            publish=git_remote,
+            setup_command=(sys.executable, str(_setup_marker_script(tmp_path))),
+        )
+        result = _run_published(candidate, git_remote)
+    finally:
+        api.stop()
+        git_remote.stop()
+    assert result["status"] == "returned_for_review"
+    assert result["logs"][0]["stage"] == "setup"
+    assert result["logs"][0]["exit_code"] == 0
+
+
+def test_check_stops_when_setup_never_ran(tmp_path: Path) -> None:
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    try:
+        candidate = _candidate(tmp_path, api, sha, _gated_script(tmp_path))
+        result = candidate.run_once()
+    finally:
+        api.stop()
+    assert result["status"] == "stopped"
+    assert all(entry["stage"] == "test" for entry in result["logs"])
+
+
+def test_failing_setup_stops_before_the_check(tmp_path: Path) -> None:
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    try:
+        candidate = _candidate(
+            tmp_path,
+            api,
+            sha,
+            _gated_script(tmp_path),
+            setup_command=(sys.executable, str(_setup_fail_script(tmp_path))),
+        )
+        result = candidate.run_once()
+    finally:
+        api.stop()
+    assert result["status"] == "stopped"
+    assert result["logs"][0]["stage"] == "setup"
+    assert result["logs"][0]["exit_code"] == 3
+    attempts = candidate.paths.workspace / "src" / "attempts.txt"
+    assert not attempts.exists(), "the check command must not run after a failed setup"
+
+
+def _named_marker_script(tmp: Path, name: str, marker: str) -> Path:
+    path = tmp / name
+    path.write_text(
+        f"import pathlib\npathlib.Path({marker!r}).write_text('ok')\n", encoding="utf-8"
+    )
+    return path
+
+
+def test_setup_mismatch_with_the_manifest_never_runs(tmp_path: Path) -> None:
+    # Cody's regression for PR #18: the manifest approved setup A; the
+    # candidate is configured with setup B. B must never run, A must not
+    # run either (the run is refused), and the check never starts.
+    from dataclasses import replace
+
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    try:
+        script_a = _named_marker_script(tmp_path, "setup-a.py", "setup-a.txt")
+        script_b = _named_marker_script(tmp_path, "setup-b.py", "setup-b.txt")
+        candidate = _candidate(
+            tmp_path,
+            api,
+            sha,
+            _gated_script(tmp_path),
+            setup_command=(sys.executable, str(script_b)),
+        )
+        real_service = candidate._service
+
+        def bound_service(number: int, base_branch: str):
+            service = real_service(number, base_branch)
+            service.config = replace(
+                service.config, setup_command=(sys.executable, str(script_a))
+            )
+            return service
+
+        candidate._service = bound_service
+        with pytest.raises(Forbidden, match="does not match the approved manifest"):
+            candidate.run_once()
+        claim = candidate.ledger.get(candidate._key(9))
+    finally:
+        api.stop()
+    root = candidate.paths.workspace / "src"
+    assert claim is not None and claim["status"] == "blocked"
+    assert not (root / "setup-a.txt").exists(), "the bound setup must not run on a refused run"
+    assert not (root / "setup-b.txt").exists(), "the swapped-in setup must never run"
+    assert not (root / "attempts.txt").exists(), "the check must not start"
+
+
+def test_setup_timeout_releases_the_claim(tmp_path: Path) -> None:
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    try:
+        slow = tmp_path / "setup-slow.py"
+        slow.write_text("import time\ntime.sleep(5)\n", encoding="utf-8")
+        candidate = _candidate(
+            tmp_path,
+            api,
+            sha,
+            _gated_script(tmp_path),
+            setup_command=(sys.executable, str(slow)),
+        )
+        candidate.command_timeout_seconds = 1
+        result = candidate.run_once()
+        claim = candidate.ledger.get(candidate._key(9))
+    finally:
+        api.stop()
+    assert result["status"] == "stopped"
+    assert result["logs"][0]["stage"] == "setup"
+    assert result["logs"][0]["error"] == "timed_out"
+    assert claim is not None and claim["status"] == "stopped"
+    attempts = candidate.paths.workspace / "src" / "attempts.txt"
+    assert not attempts.exists(), "the check must not run after a setup timeout"

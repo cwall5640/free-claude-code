@@ -99,6 +99,7 @@ def _runtime(tmp_path: Path) -> dict[str, object]:
         "command_cwd": "src",
         "allowed_path_prefixes": ("src",),
         "command_timeout_seconds": 10.0,
+        "setup_command": None,
         "publish_origin": "",
         "ca_file": "",
     }

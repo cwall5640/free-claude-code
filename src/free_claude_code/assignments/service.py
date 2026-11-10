@@ -385,7 +385,10 @@ class AssignmentService:
         self, issue: IssueSnapshot, entry: AllowlistEntry, base_sha: str
     ) -> TaskManifest:
         prefixes = validate_prefixes(self.config.allowed_path_prefixes)
-        scope = Scope(prefixes, self.config.max_patch_bytes)
+        setup = tuple(self.config.setup_command)
+        if any(not isinstance(part, str) or not part for part in setup):
+            raise ScopeError("setup command parts must be non-empty strings")
+        scope = Scope(prefixes, self.config.max_patch_bytes, setup)
         return TaskManifest(
             task_key=self._key(issue.owner, issue.repo, issue.number),
             owner=issue.owner,
