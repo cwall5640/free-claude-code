@@ -48,6 +48,7 @@ class AssignmentConfig:
     operators: tuple[str, ...] = ()
     forbidden_branches: tuple[str, ...] = ("main", "master")
     allowed_path_prefixes: tuple[str, ...] = ()
+    setup_command: tuple[str, ...] = ()
     max_patch_bytes: int = 200_000
     fetch_timeout_seconds: float = 10.0
 
@@ -82,12 +83,14 @@ class IssueSnapshot:
 class Scope:
     allowed_prefixes: tuple[str, ...]
     max_patch_bytes: int
+    setup_command: tuple[str, ...] = ()
 
     def fingerprint(self) -> str:
         return digest(
             {
                 "allowed_prefixes": self.allowed_prefixes,
                 "max_patch_bytes": self.max_patch_bytes,
+                "setup_command": list(self.setup_command),
             }
         )
 
