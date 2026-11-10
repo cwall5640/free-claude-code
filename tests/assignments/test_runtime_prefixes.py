@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from free_claude_code.assignments import live
+from free_claude_code.assignments.secrets import SecretFile
 from free_claude_code.assignments.errors import Forbidden
 
 
@@ -28,7 +29,7 @@ def test_runtime_prefixes_reach_candidate(tmp_path, monkeypatch, prefixes):
     config = _config(tmp_path, allowed_path_prefixes=prefixes)
     monkeypatch.setattr(live, "load_worker_identity", lambda *_: SimpleNamespace(enabled=True))
     monkeypatch.setattr(live, "load_manager_config", lambda *_: [SimpleNamespace(principal_id="manager")])
-    monkeypatch.setattr(live, "load_secret_file", lambda *_: {"github_read": "test"})
+    monkeypatch.setattr(live, "load_secret_file", lambda *_: SecretFile({"github_read": "test"}))
     monkeypatch.setattr(live, "GitHubHttpClient", lambda *args, **kwargs: None)
     monkeypatch.setattr(live, "_verifier", lambda *args: None)
     monkeypatch.setattr(live, "AssignmentCandidate", lambda **kwargs: SimpleNamespace(**kwargs))
