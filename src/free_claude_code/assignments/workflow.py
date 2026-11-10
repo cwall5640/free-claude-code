@@ -33,6 +33,7 @@ from free_claude_code.assignments.errors import (
     Disabled,
     Forbidden,
     MergeRejected,
+    TimedOut,
 )
 from free_claude_code.assignments.execution import (
     GitWorkspace,
@@ -653,6 +654,7 @@ class AssignmentCandidate:
         command_cwd: str,
         allowed_path_prefixes: tuple[str, ...] = ("src",),
         command_timeout_seconds: float = 10.0,
+        setup_command: tuple[str, ...] | None = None,
         grants_dir: Path | None = None,
         model_proxy_base_url: str = "http://127.0.0.1:8082",
         repair_limit: int = REPAIR_LIMIT,
@@ -671,6 +673,7 @@ class AssignmentCandidate:
         self.command_cwd = command_cwd
         self.allowed_path_prefixes = tuple(allowed_path_prefixes)
         self.command_timeout_seconds = float(command_timeout_seconds)
+        self.setup_command = tuple(setup_command) if setup_command else None
         self.grants_dir = grants_dir
         self.model_proxy_base_url = model_proxy_base_url
         self.repair_limit = repair_limit
@@ -789,6 +792,41 @@ class AssignmentCandidate:
         if publish_token in child_env.values() or any(name in child_env for name in PUBLISHER_ENV):
             raise Forbidden("publisher credential reached a child environment")
         sandbox = Sandbox(command_root, allowed=(self.allowed_command,), timeout_seconds=self.command_timeout_seconds)
+        bound_setup = tuple(manifest.scope.setup_command)
+        if tuple(self.setup_command or ()) != bound_setup:
+            # The manifest is the approval record: its id binds the exact
+            # setup argv through the scope fingerprint. A candidate whose
+            # configured setup differs from the bound one must not run
+            # either command.
+            self.ledger.update(key, status="blocked", repairs=repairs)
+            raise Forbidden("setup command does not match the approved manifest")
+        if bound_setup:
+            setup_sandbox = Sandbox(
+                command_root, allowed=(bound_setup,), timeout_seconds=self.command_timeout_seconds
+            )
+            try:
+                setup_evidence = setup_sandbox.run(
+                    NativeCommandApproval(manifest.manifest_id, bound_setup, attestation.principal_id),
+                    manifest=manifest,
+                    head_sha=workspace.head(),
+                    env=child_env,
+                )
+            except Forbidden:
+                self.ledger.update(key, status="blocked", repairs=repairs)
+                raise
+            except TimedOut:
+                logs.append({"stage": "setup", "exit_code": None, "stderr": "", "error": "timed_out"})
+                self.ledger.update(key, status="stopped", repairs=repairs)
+                return {"status": "stopped", "repair_attempts": repairs, "logs": logs}
+            except OSError:
+                logs.append({"stage": "setup", "exit_code": None, "stderr": "", "error": "start_failed"})
+                self.ledger.update(key, status="stopped", repairs=repairs)
+                return {"status": "stopped", "repair_attempts": repairs, "logs": logs}
+            setup_code = setup_evidence.returncode if setup_evidence.returncode is not None else 1
+            logs.append({"stage": "setup", "exit_code": setup_code, "stderr": setup_evidence.stderr_tail})
+            if setup_code != 0:
+                self.ledger.update(key, status="stopped", repairs=repairs)
+                return {"status": "stopped", "repair_attempts": repairs, "logs": logs}
         while True:
             self._run_model_if_granted(manifest, child_env)
             try:
@@ -1176,6 +1214,7 @@ class AssignmentCandidate:
             # base branches does not apply here.
             forbidden_branches=(),
             allowed_path_prefixes=self.allowed_path_prefixes,
+            setup_command=self.setup_command or (),
             fetch_timeout_seconds=self.api.timeout,
         )
         from free_claude_code.assignments.store import StateStore
