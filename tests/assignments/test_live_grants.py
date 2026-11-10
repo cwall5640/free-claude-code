@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from free_claude_code.assignments import live
-from free_claude_code.assignments.errors import ApprovalInvalid
+from free_claude_code.assignments.errors import ApprovalInvalid, Forbidden
 from free_claude_code.assignments.grants import ModelGrant, load_grant, sign_grant
 from free_claude_code.assignments.models import Scope, TaskManifest
 from free_claude_code.assignments.secrets import SecretFile, write_secret_file
@@ -136,7 +136,7 @@ def test_candidate_without_grant_key_stays_ungranted(tmp_path, monkeypatch):
 
 # ---------- workflow behavior: grant file drives the model pass ----------
 
-def _candidate(tmp_path: Path, grants_dir: Path) -> AssignmentCandidate:
+def _candidate(tmp_path: Path, grants_dir: Path, *, now: int = 1_000) -> AssignmentCandidate:
     state = tmp_path / "state"
     secrets = tmp_path / "secrets" / "values"
     write_secret_file(secrets, {"proxy_auth": "proxy-token", "grant_key": GRANT_KEY})
@@ -165,8 +165,8 @@ def _candidate(tmp_path: Path, grants_dir: Path) -> AssignmentCandidate:
         grants_dir=grants_dir,
     )
     candidate.grant_key = GRANT_KEY
-    candidate.now = 1_000
-    candidate._publish_token = ""
+    candidate.now = now
+    candidate._publish_token = "publish-token-fixture"
     return candidate
 
 
@@ -220,4 +220,52 @@ def test_model_pass_rejects_wrong_key_grant(tmp_path):
     candidate = _candidate(tmp_path, grants_dir)
     candidate.model_spawn = lambda argv, env, workspace: None
     with pytest.raises(ApprovalInvalid):
+        candidate._run_model_if_granted(manifest, {})
+
+
+def _write_grant(grants_dir: Path, grant: ModelGrant) -> None:
+    grants_dir.mkdir(exist_ok=True)
+    (grants_dir / f"{grant.manifest_id}.json").write_text(
+        json.dumps(_grant_dict(grant)), encoding="utf-8"
+    )
+
+
+def test_model_pass_rejects_expired_grant_on_the_real_clock(tmp_path):
+    # now=0 is the live construction default: the candidate must read the
+    # real clock, so a grant that expired in 1970 is rejected even though
+    # no test clock was injected.
+    manifest = _manifest()
+    grants_dir = tmp_path / "grants"
+    _write_grant(grants_dir, _signed(manifest, expires_at=1))
+    candidate = _candidate(tmp_path, grants_dir, now=0)
+    candidate.model_spawn = lambda argv, env, workspace: pytest.fail("must not spawn")
+    with pytest.raises(ApprovalInvalid):
+        candidate._run_model_if_granted(manifest, {})
+
+
+def test_model_pass_advancing_clock_rejects_after_expiry(tmp_path):
+    manifest = _manifest()
+    grants_dir = tmp_path / "grants"
+    _write_grant(grants_dir, _signed(manifest, expires_at=5_000))
+    candidate = _candidate(tmp_path, grants_dir, now=1_000)
+    spawns: list[object] = []
+    candidate.model_spawn = lambda argv, env, workspace: spawns.append(argv)
+    candidate._run_model_if_granted(manifest, {})
+    assert len(spawns) == 1
+    candidate.now = 6_000
+    with pytest.raises(ApprovalInvalid):
+        candidate._run_model_if_granted(manifest, {})
+    assert len(spawns) == 1, "an expired grant must not spawn a repair pass"
+
+
+def test_model_pass_fails_closed_without_a_grant_key(tmp_path):
+    manifest = _manifest()
+    grants_dir = tmp_path / "grants"
+    # A grant signed with the publicly known empty key must never verify:
+    # with no key configured the candidate refuses before the launcher.
+    _write_grant(grants_dir, _signed(manifest, key=""))
+    candidate = _candidate(tmp_path, grants_dir)
+    candidate.grant_key = ""
+    candidate.model_spawn = lambda argv, env, workspace: pytest.fail("must not spawn")
+    with pytest.raises(Forbidden, match="no grant key is configured"):
         candidate._run_model_if_granted(manifest, {})
