@@ -322,6 +322,25 @@ def test_timeout_cancel_and_resume(tmp_path: Path) -> None:
     assert "resumed" in resumed.stdout_tail
 
 
+def test_timed_out_carries_partial_output(tmp_path: Path) -> None:
+    manifest = _manifest_for_probe()
+    argv = (
+        sys.executable,
+        "-c",
+        "import sys, time; print('partial-out', flush=True); "
+        "print('partial-err', file=sys.stderr, flush=True); time.sleep(5)",
+    )
+    sandbox = Sandbox(tmp_path, allowed=(argv,), timeout_seconds=0.5)
+    with pytest.raises(TimedOut) as caught:
+        sandbox.run(
+            NativeCommandApproval(manifest.manifest_id, argv, "author"),
+            manifest=manifest,
+            head_sha="abc",
+        )
+    assert "partial-out" in caught.value.stdout_tail
+    assert "partial-err" in caught.value.stderr_tail
+
+
 def test_ci_read_is_not_a_rerun_or_a_test(tmp_path: Path) -> None:
     reader = CiReader(
         (CiCheck("unit", "completed", "failure", "sha", 30.0, "log"),),

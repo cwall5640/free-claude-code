@@ -839,6 +839,38 @@ class AssignmentCandidate:
             except Forbidden:
                 self.ledger.update(key, status="blocked", repairs=repairs)
                 raise
+            except TimedOut as error:
+                # Same semantics as the setup stage (PR #18): a timeout is an
+                # environment outcome, not a code failure — it consumes no
+                # repair attempt, and the claim stops with the partial output
+                # recorded instead of escaping and stranding the claim active
+                # (FCC #20, step-8 run #4).
+                logs.append(
+                    {
+                        "stage": "test",
+                        "exit_code": None,
+                        "stderr": getattr(error, "stderr_tail", ""),
+                        "error": "timed_out",
+                    }
+                )
+                self.ledger.update(key, status="stopped", repairs=repairs)
+                return {
+                    "status": "stopped",
+                    "repair_attempts": repairs,
+                    "logs": logs,
+                    "head_sha": workspace.head(),
+                    "merged": False,
+                }
+            except OSError:
+                logs.append({"stage": "test", "exit_code": None, "stderr": "", "error": "start_failed"})
+                self.ledger.update(key, status="stopped", repairs=repairs)
+                return {
+                    "status": "stopped",
+                    "repair_attempts": repairs,
+                    "logs": logs,
+                    "head_sha": workspace.head(),
+                    "merged": False,
+                }
             code = evidence.returncode if evidence.returncode is not None else 1
             logs.append({"stage": "test", "exit_code": code, "stderr": evidence.stderr_tail})
             if code == 0:
