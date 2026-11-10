@@ -120,6 +120,13 @@ def _runtime(config: Path) -> dict[str, object]:
     command = raw.get("allowed_command")
     if not isinstance(command, list) or not command or not all(isinstance(part, str) and part for part in command):
         raise Forbidden("runtime allowed command is missing")
+    setup_command = raw.get("setup_command")
+    if "setup_command" in raw and (
+        not isinstance(setup_command, list)
+        or not setup_command
+        or not all(isinstance(part, str) and part for part in setup_command)
+    ):
+        raise Forbidden("runtime setup command is malformed")
     owner = str(raw.get("owner", "")).strip()
     repo = str(raw.get("repo", "")).strip()
     if not owner or not repo or owner == repo:
@@ -152,6 +159,7 @@ def _runtime(config: Path) -> dict[str, object]:
         raise Forbidden("poll interval is out of bounds")
     return {
         "allowed_command": tuple(command),
+        "setup_command": tuple(setup_command) if setup_command is not None else None,
         "command_timeout_seconds": float(timeout),
         "allowed_path_prefixes": allowed_path_prefixes,
         "audience": str(raw.get("audience", "")).strip(),
@@ -216,6 +224,7 @@ def _candidate(state: Path, config: Path, runtime: dict[str, object]) -> Assignm
         allowed_path_prefixes=tuple(runtime["allowed_path_prefixes"]),
         command_timeout_seconds=float(runtime["command_timeout_seconds"]),
         grants_dir=state / "grants",
+        setup_command=tuple(runtime["setup_command"]) if runtime["setup_command"] else None,
         repair_limit=REPAIR_LIMIT,
         identity=identity,
     )
