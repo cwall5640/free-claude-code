@@ -30,6 +30,7 @@ from free_claude_code.assignments.execution import (
     NativeCommandApproval,
     NvidiaClaudeLauncher,
     Sandbox,
+    assignment_claude_argv,
     TokenVault,
     apply_scoped_write,
     build_verdict,
@@ -474,9 +475,22 @@ def test_nvidia_launcher_refuses_without_grant(tmp_path: Path, monkeypatch: pyte
     argv = seen["argv"]
     assert isinstance(argv, tuple)
     assert "--dangerously-skip-permissions" not in argv
+    assert "--verbose" in argv
     assert "GITHUB_TOKEN" not in seen["env"]
     assert seen["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8082"
     assert SECRET not in str(seen["env"])
+
+
+def test_assignment_claude_argv_pairs_stream_json_with_verbose(tmp_path: Path) -> None:
+    """Regression for FCC #19: `claude -p --output-format stream-json` exits
+    immediately unless --verbose is present, so the assignment launcher's argv
+    must always carry the pairing (and never the permission-bypass flag)."""
+
+    argv = assignment_claude_argv("claude", tmp_path)
+    assert "-p" in argv
+    assert argv[argv.index("--output-format") + 1] == "stream-json"
+    assert "--verbose" in argv
+    assert "--dangerously-skip-permissions" not in argv
 
 
 def test_default_publisher_and_base_sha_guard(tmp_path: Path) -> None:

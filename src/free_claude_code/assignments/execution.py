@@ -578,6 +578,9 @@ def assignment_claude_argv(claude_bin: str, workspace: Path) -> tuple[str, ...]:
         prompt,
         "--output-format",
         "stream-json",
+        # The claude CLI rejects -p with stream-json unless --verbose is set
+        # (live failure, FCC #19: the model pass exited before editing).
+        "--verbose",
         "--add-dir",
         str(workspace),
     )
