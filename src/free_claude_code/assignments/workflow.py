@@ -684,6 +684,7 @@ class AssignmentCandidate:
         self.model_grant_factory = None
         self.grant_key = ""
         self.now = 0
+        self.clock = time.time
         self.identity = identity or default_worker_identity()
         self.waiting_label = self.identity.waiting_label
         self.publish_enabled = False
@@ -863,6 +864,13 @@ class AssignmentCandidate:
             "slack": slack,
         }
 
+    def _model_now(self) -> int:
+        # A frozen zero (the construction default) means "use the real
+        # clock": a live candidate must never verify a grant against a
+        # stopped clock, or grant expiry never bites. Tests inject `now`
+        # (a fixed reading) or replace `clock` to advance time.
+        return self.now if self.now else int(self.clock())
+
     def _run_model_if_granted(self, manifest: object, child_env: dict[str, str]) -> None:
         if self.model_grant is None and self.model_grant_factory is not None:
             self.model_grant = self.model_grant_factory(manifest)
@@ -872,6 +880,8 @@ class AssignmentCandidate:
             )
         if self.model_grant is None:
             return
+        if not self.grant_key:
+            raise Forbidden("a model grant is present but no grant key is configured")
         from free_claude_code.assignments.execution import NvidiaClaudeLauncher
 
         proxy_auth = load_secret_file(self.paths.secrets_file).get("proxy_auth")
@@ -882,7 +892,7 @@ class AssignmentCandidate:
                 self.paths.workspace,
                 self.model_grant,
                 grant_key=self.grant_key,
-                now=self.now,
+                now=self._model_now(),
                 revocations=load_revocations(self.paths.state_dir / "revocations.txt"),
                 spawn=None,
             )
@@ -900,7 +910,7 @@ class AssignmentCandidate:
             self.paths.workspace,
             self.model_grant,
             grant_key=self.grant_key,
-            now=self.now,
+            now=self._model_now(),
             revocations=load_revocations(self.paths.state_dir / "revocations.txt"),
             spawn=spawn,
         )
