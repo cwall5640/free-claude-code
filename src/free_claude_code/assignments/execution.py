@@ -472,7 +472,13 @@ class Sandbox:
         )
         self.evidence.append(evidence)
         if timed_out:
-            raise TimedOut("command exceeded its timeout")
+            # Carry the partial output on the exception: callers recording
+            # the timeout (FCC #20) must not lose what the command printed
+            # before it was killed.
+            error = TimedOut("command exceeded its timeout")
+            error.stdout_tail = evidence.stdout_tail
+            error.stderr_tail = evidence.stderr_tail
+            raise error
         if cancelled:
             raise Cancelled("command was cancelled")
         return evidence

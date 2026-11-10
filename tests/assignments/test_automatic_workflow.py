@@ -19,7 +19,7 @@ import pytest
 
 from free_claude_code.assignments.candidate import main as candidate_main
 from free_claude_code.assignments.cli import main as cli_main
-from free_claude_code.assignments.errors import ApprovalInvalid, Conflict, Disabled, Forbidden, MergeRejected, TimedOut
+from free_claude_code.assignments.errors import ApprovalInvalid, Conflict, Disabled, Forbidden, MergeRejected
 from free_claude_code.assignments.execution import scrub_env
 from free_claude_code.assignments.github_http import GitHubHttpClient
 from free_claude_code.assignments.handoff import actor_label, assert_handoff_label, load_actor_map
@@ -1796,10 +1796,12 @@ def test_run_once_with_main_base_and_configured_prefixes(tmp_path: Path) -> None
 
 
 def test_run_once_enforces_configured_command_timeout(tmp_path: Path) -> None:
-    """A command slower than the configured timeout dies with TimedOut.
+    """A command slower than the configured timeout is killed by it.
 
     With the previously hardcoded 10 seconds the 3-second sleeper would
-    pass the sandbox; the configured 0.5 seconds must kill it.
+    pass the sandbox; the configured 0.5 seconds must kill it. Since FCC
+    #20 the kill surfaces as a stopped result with timed_out evidence
+    (and the claim released) rather than an escaping TimedOut.
     """
     _origin(tmp_path)
     sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
@@ -1809,10 +1811,13 @@ def test_run_once_enforces_configured_command_timeout(tmp_path: Path) -> None:
     try:
         candidate = _candidate(tmp_path, api, sha, sleeper)
         candidate.command_timeout_seconds = 0.5
-        with pytest.raises(TimedOut):
-            candidate.run_once()
+        result = candidate.run_once()
+        claim = candidate.ledger.get(candidate._key(9))
     finally:
         api.stop()
+    assert result["status"] == "stopped"
+    assert result["logs"][0]["error"] == "timed_out"
+    assert claim is not None and claim["status"] == "stopped"
 
 
 def _setup_marker_script(tmp: Path) -> Path:
@@ -1991,3 +1996,30 @@ def test_setup_timeout_releases_the_claim(tmp_path: Path) -> None:
     assert claim is not None and claim["status"] == "stopped"
     attempts = candidate.paths.workspace / "src" / "attempts.txt"
     assert not attempts.exists(), "the check must not run after a setup timeout"
+
+
+def test_check_timeout_stops_with_evidence_and_no_repair_spent(tmp_path: Path) -> None:
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    try:
+        slow = tmp_path / "check-slow.py"
+        slow.write_text(
+            "import sys, time\n"
+            "print('check-started', file=sys.stderr, flush=True)\n"
+            "time.sleep(5)\n",
+            encoding="utf-8",
+        )
+        candidate = _candidate(tmp_path, api, sha, slow)
+        candidate.command_timeout_seconds = 1
+        result = candidate.run_once()
+        claim = candidate.ledger.get(candidate._key(9))
+    finally:
+        api.stop()
+    assert result["status"] == "stopped"
+    assert result["repair_attempts"] == 0
+    assert result["logs"][0]["stage"] == "test"
+    assert result["logs"][0]["error"] == "timed_out"
+    assert "check-started" in result["logs"][0]["stderr"]
+    assert claim is not None and claim["status"] == "stopped"
+    assert claim.get("repairs", 0) == 0
