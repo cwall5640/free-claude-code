@@ -595,6 +595,34 @@ def plant_task_card(workspace: Path, manifest: TaskManifest, issue: IssueSnapsho
     return target
 
 
+def scope_write_rules(workspace: Path, manifest: TaskManifest) -> tuple[str, ...]:
+    """Claude Code Edit/Write permission rules for the signed scope.
+
+    Derived from the manifest's allowed prefixes at argv-build time, never
+    hardcoded. Each prefix is typed by what it actually is in the
+    workspace: an existing directory yields a recursive glob rule (e.g.
+    "changes" -> "changes/**"); anything else yields an exact-path rule
+    (e.g. ".gitignore"). The final path segment's spelling is not a type —
+    a dotted name can be a directory and an extensionless name can be a
+    file ("Dockerfile") — so the rule never comes from the name (review
+    finding on PR #29).
+
+    A prefix that does not exist in the workspace yet fails closed to the
+    exact-path rule: a not-yet-existing prefix gets no recursive grant.
+    Typing here only shapes the model's pre-approved writes; the
+    publisher-side scope validation remains the hard enforcement of the
+    signed scope. Patterns are relative to the model cwd, which is the
+    workspace (see --add-dir).
+    """
+
+    rules: list[str] = []
+    for prefix in manifest.scope.allowed_prefixes:
+        pattern = f"{prefix}/**" if (workspace / prefix).is_dir() else prefix
+        rules.append(f"Edit({pattern})")
+        rules.append(f"Write({pattern})")
+    return tuple(rules)
+
+
 def assignment_claude_argv(
     claude_bin: str, workspace: Path, manifest: TaskManifest
 ) -> tuple[str, ...]:
@@ -603,6 +631,13 @@ def assignment_claude_argv(
     The prompt is built from the signed manifest: it names the planted task
     card and lists the approved scope prefixes. The issue body is not copied
     onto argv; it reaches the model only as the planted card file (FCC #26).
+
+    The pass runs non-interactively (-p, permission mode default), so nobody
+    can approve a write at runtime: run #12 read the task and ended its turn
+    asking for write permission instead of editing. The argv therefore
+    pre-approves exactly the writes the signed scope allows — Edit/Write
+    rules derived from the manifest prefixes via --allowedTools — and
+    nothing else. No bypass flag, no accept-edits mode, no other tool.
     """
 
     prompt = (
@@ -624,6 +659,9 @@ def assignment_claude_argv(
         # The claude CLI rejects -p with stream-json unless --verbose is set
         # (live failure, FCC #19: the model pass exited before editing).
         "--verbose",
+        # One comma-separated value, the shape the repo's CLI matrix uses.
+        "--allowedTools",
+        ",".join(scope_write_rules(workspace, manifest)),
         "--add-dir",
         str(workspace),
     )

@@ -563,6 +563,161 @@ def test_assignment_claude_argv_prompt_is_built_from_the_manifest(tmp_path: Path
     assert "--dangerously-skip-permissions" not in argv
 
 
+def _manifest_with_scope(prefixes: tuple[str, ...]):
+    from free_claude_code.assignments.models import ModelProvenance, Scope, TaskManifest
+
+    snapshot = _issue("probe")
+    return TaskManifest(
+        task_key="cwall5640/fixture#7",
+        owner="cwall5640",
+        repo="fixture",
+        issue_number=7,
+        issue_revision=snapshot.revision(),
+        title_redacted="probe",
+        base_branch="dev",
+        base_sha="abc",
+        scope=Scope(prefixes, 1000),
+        model=ModelProvenance(),
+    )
+
+
+def _allowed_tools(argv: tuple[str, ...]) -> list[str]:
+    assert "--allowedTools" in argv
+    return argv[argv.index("--allowedTools") + 1].split(",")
+
+
+def test_assignment_claude_argv_allowlist_matches_the_signed_scope(tmp_path: Path) -> None:
+    """Follow-up to FCC #26: run #12's model read the planted task and ended
+    its turn asking for write permission — in -p mode nobody can grant it.
+    The argv must pre-approve Edit/Write for exactly the signed scope: a
+    file prefix as an exact-path rule, a directory prefix as a glob rule.
+    The workspace fixture mirrors a real clone: ".gitignore" exists as a
+    file and "changes" as a directory."""
+
+    (tmp_path / ".gitignore").write_text("*.pyc\n", encoding="utf-8")
+    (tmp_path / "changes").mkdir()
+    argv = assignment_claude_argv(
+        "claude", tmp_path, _manifest_with_scope((".gitignore", "changes"))
+    )
+    assert _allowed_tools(argv) == [
+        "Edit(.gitignore)",
+        "Write(.gitignore)",
+        "Edit(changes/**)",
+        "Write(changes/**)",
+    ]
+    # Nothing beyond Edit/Write inside the scope is pre-approved.
+    assert all(rule.startswith(("Edit(", "Write(")) for rule in _allowed_tools(argv))
+    assert "--dangerously-skip-permissions" not in argv
+    assert "--permission-mode" not in argv
+
+
+def test_assignment_claude_argv_allowlist_is_derived_not_hardcoded(tmp_path: Path) -> None:
+    """A different signed scope must yield different rules: the allowlist
+    comes from the manifest, not from the CLAUDE1-TEST-02 task. The
+    workspace fixture carries "src" as a directory and "docs/guide.md"
+    as a file, as a real clone would."""
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "guide.md").write_text("# guide\n", encoding="utf-8")
+    argv = assignment_claude_argv(
+        "claude", tmp_path, _manifest_with_scope(("src", "docs/guide.md"))
+    )
+    assert _allowed_tools(argv) == [
+        "Edit(src/**)",
+        "Write(src/**)",
+        "Edit(docs/guide.md)",
+        "Write(docs/guide.md)",
+    ]
+    assert all(".gitignore" not in part and "changes" not in part for part in argv)
+
+
+def test_assignment_claude_argv_allowlist_dotted_directory_is_a_directory(
+    tmp_path: Path,
+) -> None:
+    """Regression for the PR #29 review: prefix typing comes from the
+    workspace, not the name. A directory whose name contains a dot is a
+    directory and gets the recursive glob rule, not an exact-path rule."""
+
+    (tmp_path / "docs.v2").mkdir()
+    argv = assignment_claude_argv(
+        "claude", tmp_path, _manifest_with_scope(("docs.v2",))
+    )
+    assert _allowed_tools(argv) == ["Edit(docs.v2/**)", "Write(docs.v2/**)"]
+
+
+def test_assignment_claude_argv_allowlist_extensionless_file_is_a_file(
+    tmp_path: Path,
+) -> None:
+    """Regression for the PR #29 review: an extensionless file (e.g.
+    "Dockerfile") is a file and gets the exact-path rule — the name-based
+    heuristic granted it a recursive glob over a same-named directory."""
+
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    argv = assignment_claude_argv(
+        "claude", tmp_path, _manifest_with_scope(("Dockerfile",))
+    )
+    assert _allowed_tools(argv) == ["Edit(Dockerfile)", "Write(Dockerfile)"]
+
+
+def test_assignment_claude_argv_allowlist_missing_prefix_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """A prefix that does not exist in the workspace yet gets no recursive
+    grant: exact-path rules only, whatever its name looks like."""
+
+    argv = assignment_claude_argv(
+        "claude", tmp_path, _manifest_with_scope(("brand-new-dir",))
+    )
+    assert _allowed_tools(argv) == [
+        "Edit(brand-new-dir)",
+        "Write(brand-new-dir)",
+    ]
+
+
+def test_launcher_argv_carries_the_scope_allowlist(tmp_path: Path) -> None:
+    """End to end through the launcher: the spawned argv carries the
+    allowlist derived from the probe manifest's ("src",) scope. The
+    workspace fixture carries "src" as a directory, as a materialized
+    clone would, so the probe scope types as a directory."""
+
+    from free_claude_code.assignments.grants import sign_grant, ModelGrant
+
+    (tmp_path / "src").mkdir()
+    manifest = _manifest_for_probe()
+    unsigned = ModelGrant(
+        manifest.manifest_id,
+        f"{manifest.owner}/{manifest.repo}",
+        manifest.base_sha,
+        manifest.issue_revision,
+        10,
+        ("implement",),
+        "0" * 64,
+    )
+    grant = sign_grant("k", unsigned)
+    launcher = NvidiaClaudeLauncher("claude", "http://127.0.0.1:8082", "proxy-token")
+    seen: dict[str, object] = {}
+
+    def spawn(argv: tuple[str, ...], env: dict[str, str], cwd: Path) -> None:
+        seen["argv"] = argv
+
+    launcher.run(
+        manifest,
+        tmp_path,
+        grant,
+        issue=_issue("probe"),
+        grant_key="k",
+        now=1,
+        revocations=set(),
+        spawn=spawn,
+    )
+    assert launcher.spawned is True
+    argv = seen["argv"]
+    assert isinstance(argv, tuple)
+    assert _allowed_tools(argv) == ["Edit(src/**)", "Write(src/**)"]
+    assert "--dangerously-skip-permissions" not in argv
+
+
 def test_launcher_refuses_an_issue_that_changed_after_approval(
     tmp_path: Path,
 ) -> None:
