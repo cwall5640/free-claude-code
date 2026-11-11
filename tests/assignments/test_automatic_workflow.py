@@ -1895,6 +1895,202 @@ def test_run_once_stops_when_the_model_session_fails(
     assert not (tmp_path / "run" / "workspace" / "src" / "check-ran.txt").exists()
 
 
+def _pin_cp1252_locale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Simulate the Windows laptop's cp1252 platform default on any OS.
+
+    Every seam the interpreter consults for the default text encoding is
+    pinned to cp1252: locale.getpreferredencoding (the classic API),
+    locale.getencoding (3.11+), and subprocess's own default-encoding
+    resolution, which on the pinned 3.14 interpreter short-circuits
+    before the locale when UTF-8 mode is on.
+    """
+    import locale
+    import subprocess
+
+    monkeypatch.setattr(locale, "getpreferredencoding", lambda *args, **kwargs: "cp1252")
+    monkeypatch.setattr(locale, "getencoding", lambda: "cp1252")
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+
+
+def test_model_launcher_decodes_output_as_utf8_under_a_cp1252_locale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EXEC-DECODE-01: subprocess output capture must pin UTF-8 decoding.
+
+    Step-8 run #16 died about 35 seconds in on the Windows laptop, before
+    any edit: the output-capture sites in execution.py used text=True
+    with no encoding, so the captured stream decoded with the locale
+    codec (cp1252), and a UTF-8 byte that is undefined in cp1252 (0x90,
+    inside the fullwidth digit U+FF10) raised UnicodeDecodeError in the
+    subprocess reader thread. The launcher lost the session's result
+    event, PR #32's fail-closed inspection reported a dead session, and
+    the claim stopped. Runs #13-15 escaped only because their streams
+    happened to contain no cp1252-invalid byte.
+
+    The laptop's locale is simulated on any OS by pinning every seam
+    that resolves the platform default encoding to cp1252 while the
+    real launcher (spawn=None) drives a fake claude whose success
+    stream carries that exact byte. The fake is portable by
+    construction: the launcher executable is the real Python
+    interpreter (sys.executable, which resolve_program passes through
+    unchanged) and the generated script is inserted as its first
+    argument through a narrow wrap of the argv builder. The original
+    version passed a #! script as the executable, which subprocess
+    cannot execute natively on Windows — the very platform affected
+    (Cody, PR #34). The argv builder is covered by its own tests; this
+    test targets the capture decoding, so only the script insertion is
+    wrapped and the real subprocess.run capture path runs unmocked.
+    The pass must come back clean; with the decoding unpinned the
+    launcher raises ModelSessionFailed instead.
+    """
+    from free_claude_code.assignments import execution
+    from free_claude_code.assignments.execution import NvidiaClaudeLauncher
+
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    try:
+        candidate = _candidate(tmp_path, api, sha, _ok_script(tmp_path), name="decode")
+        # The same manifest the candidate's execute stage would build,
+        # fetched through its own service path (no pipeline side effects).
+        service = candidate._service(9, "dev")
+        manifest = service.fetch(candidate.owner, candidate.repo, 9, reader=candidate.api)
+        issue = candidate.api.fetch_issue(
+            manifest.owner,
+            manifest.repo,
+            manifest.issue_number,
+            timeout=candidate.api.timeout,
+        )
+    finally:
+        api.stop()
+
+    fake = tmp_path / "fake-claude.py"
+    fake.write_text(
+        "\n".join(
+            [
+                "import json, sys",
+                "events = [",
+                "    {'type': 'assistant', 'message': {'content': []}},",
+                "    {'type': 'result', 'subtype': 'success', 'is_error': False,",
+                "     'result': 'implemented step ' + chr(0xFF10)},",
+                "]",
+                "for event in events:",
+                "    line = json.dumps(event, ensure_ascii=False) + chr(10)",
+                "    sys.stdout.buffer.write(line.encode('utf-8'))",
+                "sys.stdout.buffer.flush()",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    build_argv = execution.assignment_claude_argv
+
+    def argv_with_script(claude_bin: str, workspace: Path, manifest_arg: object) -> tuple[str, ...]:
+        argv = build_argv(claude_bin, workspace, manifest_arg)  # type: ignore[arg-type]
+        return (argv[0], str(fake), *argv[1:])
+
+    monkeypatch.setattr(execution, "assignment_claude_argv", argv_with_script)
+    workspace = tmp_path / "decode-workspace"
+    (workspace / "src").mkdir(parents=True)
+    grant = sign_grant(
+        "grant-key",
+        ModelGrant(
+            manifest.manifest_id,
+            f"{manifest.owner}/{manifest.repo}",
+            manifest.base_sha,
+            manifest.issue_revision,
+            5_000,
+            ("implement",),
+            "",
+        ),
+    )
+    launcher = NvidiaClaudeLauncher(sys.executable, "http://127.0.0.1:8082", "proxy-token")
+    _pin_cp1252_locale(monkeypatch)
+    launcher.run(
+        manifest,
+        workspace,
+        grant,
+        issue=issue,
+        grant_key="grant-key",
+        now=1_000,
+        revocations=set(),
+        spawn=None,
+    )
+    assert launcher.spawned
+    assert launcher.last_argv is not None
+    assert launcher.last_argv[:2] == (sys.executable, str(fake))
+
+
+def test_git_runner_decodes_output_as_utf8_under_a_cp1252_locale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EXEC-DECODE-01, git capture site: GitWorkspace._run pins UTF-8 too.
+
+    A tracked file is edited so its content gains the fullwidth digit
+    U+FF10, so the `git diff` output stream carries byte 0x90. Under
+    the simulated cp1252 locale the runner must still return the
+    character decoded; unpinned, the subprocess reader thread dies on
+    the byte exactly as the model launcher did in run #16.
+    """
+    from free_claude_code.assignments.execution import GitWorkspace
+
+    repo = tmp_path / "git-probe"
+    repo.mkdir()
+    _git(repo, "-c", "core.autocrlf=false", "init", "-b", "dev")
+    note = repo / "note.txt"
+    note.write_bytes(b"base\n")
+    _git(repo, "add", "note.txt")
+    _git(repo, "commit", "-m", "base")
+    note.write_bytes("base\nedited step \uff10\n".encode("utf-8"))
+
+    _pin_cp1252_locale(monkeypatch)
+    diff = GitWorkspace(repo).diff()
+    assert "\uff10" in diff
+
+
+def test_sandbox_decodes_output_as_utf8_under_a_cp1252_locale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EXEC-DECODE-01, sandbox capture site: Sandbox's Popen pins UTF-8 too.
+
+    An allowlisted probe run through the real interpreter writes the
+    fullwidth digit U+FF10 to stdout as UTF-8 bytes. Under the
+    simulated cp1252 locale the captured evidence must still carry the
+    decoded character; unpinned, the communicate() reader dies on byte
+    0x90 exactly as the model launcher did in run #16.
+    """
+    from free_claude_code.assignments.execution import NativeCommandApproval, Sandbox
+
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    try:
+        candidate = _candidate(tmp_path, api, sha, _ok_script(tmp_path), name="decode-sandbox")
+        # The same manifest the candidate's execute stage would build,
+        # fetched through its own service path (no pipeline side effects).
+        service = candidate._service(9, "dev")
+        manifest = service.fetch(candidate.owner, candidate.repo, 9, reader=candidate.api)
+    finally:
+        api.stop()
+
+    probe = tmp_path / "emit.py"
+    probe.write_text(
+        "import sys\n"
+        "sys.stdout.buffer.write(('sandbox step ' + chr(0xFF10) + chr(10)).encode('utf-8'))\n"
+        "sys.stdout.buffer.flush()\n",
+        encoding="utf-8",
+    )
+    sandbox = Sandbox(tmp_path, allowed=((sys.executable, "emit.py"),))
+    _pin_cp1252_locale(monkeypatch)
+    evidence = sandbox.run(
+        NativeCommandApproval(manifest.manifest_id, (sys.executable, "emit.py"), "author"),
+        manifest=manifest,
+        head_sha="abc",
+    )
+    assert evidence.returncode == 0
+    assert "\uff10" in evidence.stdout_tail
+
+
 def _setup_marker_script(tmp: Path) -> Path:
     path = tmp / "setup-marker.py"
     path.write_text(

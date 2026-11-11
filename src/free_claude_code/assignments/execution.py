@@ -374,6 +374,8 @@ class GitWorkspace:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if check and completed.returncode != 0:
             detail = redact(completed.stderr.strip() or completed.stdout.strip())
@@ -442,6 +444,8 @@ class Sandbox:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         deadline = started + self.timeout_seconds
         while process.poll() is None:
@@ -808,6 +812,8 @@ class NvidiaClaudeLauncher:
                     check=False,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=MODEL_TIMEOUT_SECONDS,
                 )
             except subprocess.TimeoutExpired as error:
