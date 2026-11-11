@@ -21,6 +21,7 @@ from free_claude_code.assignments.errors import (
 from free_claude_code.assignments.models import (
     INTENDED_MODEL,
     SOURCE_PIN,
+    TASK_CARD_NAME,
     AllowlistEntry,
     Approval,
     AssignmentConfig,
@@ -226,7 +227,7 @@ class AssignmentService:
                     _json(manifest_payload(manifest, patch_digest)),
                 )
                 self._write_text(
-                    target / "untrusted-issue.md",
+                    target / TASK_CARD_NAME,
                     _untrusted_banner(manifest, redact(issue.body)),
                 )
                 self._write_text(

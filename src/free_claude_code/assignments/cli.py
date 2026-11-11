@@ -283,6 +283,12 @@ def _implement(operator: OperatorFile, secrets: SecretFile, manifest: TaskManife
         action="implement",
         revocations=load_revocations(operator.state_dir / "revocations.txt"),
     )
+    issue = _read_client(operator, secrets).fetch_issue(
+        manifest.owner,
+        manifest.repo,
+        manifest.issue_number,
+        timeout=operator.config.fetch_timeout_seconds,
+    )
     launcher = NvidiaClaudeLauncher(
         operator.claude_bin, operator.proxy_base_url, secrets.get("proxy_auth")
     )
@@ -290,6 +296,7 @@ def _implement(operator: OperatorFile, secrets: SecretFile, manifest: TaskManife
         manifest,
         operator.state_dir / "workspace",
         grant,
+        issue=issue,
         grant_key=secrets.get("grant_key"),
         now=now,
         revocations=load_revocations(operator.state_dir / "revocations.txt"),

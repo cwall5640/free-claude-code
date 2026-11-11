@@ -239,6 +239,18 @@ def _launch_fixture_claude(config: Path) -> None:
     manifest = _load_manifest(operator)
     secrets = load_secret_file(operator.secrets_file)
     grant = _grant_from_file(operator.state_dir / "grants" / f"{manifest.manifest_id}.json")
+    # The snapshot the fixture API serves for issue 7; its revision is the
+    # one the loaded manifest was approved for.
+    issue = IssueSnapshot(
+        owner="cwall5640",
+        repo="fixture",
+        number=7,
+        title="Fix add",
+        body="data only",
+        state="open",
+        updated_at="2026-11-08T00:00:00Z",
+        node_id="NODE1",
+    )
     script = Path(operator.claude_bin)
     launcher = NvidiaClaudeLauncher(str(script), operator.proxy_base_url, secrets.get("proxy_auth"))
 
@@ -258,6 +270,7 @@ def _launch_fixture_claude(config: Path) -> None:
         manifest,
         operator.state_dir / "workspace",
         grant,
+        issue=issue,
         grant_key=secrets.get("grant_key"),
         now=10,
         revocations=load_revocations(operator.state_dir / "revocations.txt"),

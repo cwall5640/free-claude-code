@@ -954,6 +954,14 @@ class AssignmentCandidate:
             raise Forbidden("a model grant is present but no grant key is configured")
         from free_claude_code.assignments.execution import NvidiaClaudeLauncher
 
+        # The launcher plants this snapshot as the task card and checks its
+        # revision against the signed manifest before the model launches.
+        issue = self.api.fetch_issue(
+            manifest.owner,  # type: ignore[attr-defined]
+            manifest.repo,  # type: ignore[attr-defined]
+            manifest.issue_number,  # type: ignore[attr-defined]
+            timeout=self.api.timeout,
+        )
         proxy_auth = load_secret_file(self.paths.secrets_file).get("proxy_auth")
         launcher = NvidiaClaudeLauncher("claude", self.model_proxy_base_url, proxy_auth)
         if self.model_spawn is None:
@@ -961,6 +969,7 @@ class AssignmentCandidate:
                 manifest,  # type: ignore[arg-type]
                 self.paths.workspace,
                 self.model_grant,
+                issue=issue,
                 grant_key=self.grant_key,
                 now=self._model_now(),
                 revocations=load_revocations(self.paths.state_dir / "revocations.txt"),
@@ -979,6 +988,7 @@ class AssignmentCandidate:
             manifest,  # type: ignore[arg-type]
             self.paths.workspace,
             self.model_grant,
+            issue=issue,
             grant_key=self.grant_key,
             now=self._model_now(),
             revocations=load_revocations(self.paths.state_dir / "revocations.txt"),
