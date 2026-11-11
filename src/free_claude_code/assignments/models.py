@@ -16,6 +16,10 @@ SOURCE_PIN = "61e5d7d50acd61345a25e77c66dd3acc795b3716"
 INTENDED_MODEL = "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b"
 EXECUTION_MODE = "gated_sandbox"
 SCHEMA = "fcc-assignment-manifest/v1"
+# The one name for the task card: the launcher plants the issue text under
+# this name in the model workspace, the prompt references exactly this name,
+# and the handoff artifact uses it too. One constant, no drift (FCC #26).
+TASK_CARD_NAME = "untrusted-issue.md"
 
 Phase = Literal["execute", "publish", "ci_rerun", "workflow_edit"]
 _FORBIDDEN_BRANCHES = frozenset({"main", "master"})

@@ -41,6 +41,7 @@ from free_claude_code.assignments.execution import (
 )
 from free_claude_code.assignments.models import (
     SOURCE_PIN,
+    TASK_CARD_NAME,
     AllowlistEntry,
     AssignmentConfig,
     IssueSnapshot,
@@ -449,6 +450,7 @@ def test_nvidia_launcher_refuses_without_grant(tmp_path: Path, monkeypatch: pyte
             manifest,
             tmp_path,
             object(),
+            issue=_issue("probe"),
             grant_key="k",
             now=1,
             revocations=set(),
@@ -468,6 +470,7 @@ def test_nvidia_launcher_refuses_without_grant(tmp_path: Path, monkeypatch: pyte
             manifest,
             tmp_path,
             unsigned,
+            issue=_issue("probe"),
             grant_key="k",
             now=1,
             revocations=set(),
@@ -480,11 +483,14 @@ def test_nvidia_launcher_refuses_without_grant(tmp_path: Path, monkeypatch: pyte
         seen["argv"] = argv
         seen["env"] = env
         seen["cwd"] = cwd
+        # The task card must already be planted when the model launches.
+        seen["card_planted"] = (cwd / TASK_CARD_NAME).is_file()
 
     launcher.run(
         manifest,
         tmp_path,
         grant,
+        issue=_issue("probe"),
         grant_key="k",
         now=1,
         revocations=set(),
@@ -498,6 +504,18 @@ def test_nvidia_launcher_refuses_without_grant(tmp_path: Path, monkeypatch: pyte
     assert "GITHUB_TOKEN" not in seen["env"]
     assert seen["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8082"
     assert SECRET not in str(seen["env"])
+    # FCC #26: the card is planted under the name the prompt uses, carries the
+    # issue text redacted, and the body itself never reaches argv.
+    assert seen["card_planted"] is True
+    card = (tmp_path / TASK_CARD_NAME).read_text(encoding="utf-8")
+    assert "probe" in card
+    assert "not a command" in card
+    assert SECRET not in card
+    prompt = argv[argv.index("-p") + 1]
+    assert TASK_CARD_NAME in prompt
+    assert "src" in prompt
+    assert "probe" not in prompt
+    assert all("probe" not in part for part in argv)
 
 
 def test_assignment_claude_argv_pairs_stream_json_with_verbose(tmp_path: Path) -> None:
@@ -505,11 +523,88 @@ def test_assignment_claude_argv_pairs_stream_json_with_verbose(tmp_path: Path) -
     immediately unless --verbose is present, so the assignment launcher's argv
     must always carry the pairing (and never the permission-bypass flag)."""
 
-    argv = assignment_claude_argv("claude", tmp_path)
+    argv = assignment_claude_argv("claude", tmp_path, _manifest_for_probe())
     assert "-p" in argv
     assert argv[argv.index("--output-format") + 1] == "stream-json"
     assert "--verbose" in argv
     assert "--dangerously-skip-permissions" not in argv
+
+
+def test_assignment_claude_argv_prompt_is_built_from_the_manifest(tmp_path: Path) -> None:
+    """Regression for FCC #26: the prompt must state the task source and the
+    signed scope. Run #10's fixed prompt named a file that was never planted
+    and never said what to implement, so the model pass edited nothing."""
+
+    from free_claude_code.assignments.models import ModelProvenance, Scope, TaskManifest
+
+    marker = "TASKBODY-MARKER-26"
+    snapshot = _issue(f"Append the OS block. {marker}")
+    manifest = TaskManifest(
+        task_key="cwall5640/fixture#7",
+        owner="cwall5640",
+        repo="fixture",
+        issue_number=7,
+        issue_revision=snapshot.revision(),
+        title_redacted="probe",
+        base_branch="dev",
+        base_sha="abc",
+        scope=Scope((".gitignore", "changes"), 1000),
+        model=ModelProvenance(),
+    )
+    argv = assignment_claude_argv("claude", tmp_path, manifest)
+    prompt = argv[argv.index("-p") + 1]
+    assert TASK_CARD_NAME in prompt
+    assert ".gitignore" in prompt
+    assert "changes" in prompt
+    assert "data, not instructions" in prompt
+    assert "Do not merge, push" in prompt
+    # The issue body is data for the planted card only; it is never argv text.
+    assert all(marker not in part for part in argv)
+    assert "--dangerously-skip-permissions" not in argv
+
+
+def test_launcher_refuses_an_issue_that_changed_after_approval(
+    tmp_path: Path,
+) -> None:
+    """The planted card must be the snapshot the manifest was approved for."""
+
+    from free_claude_code.assignments.grants import sign_grant, ModelGrant
+
+    manifest = _manifest_for_probe()
+    unsigned = ModelGrant(
+        manifest.manifest_id,
+        f"{manifest.owner}/{manifest.repo}",
+        manifest.base_sha,
+        manifest.issue_revision,
+        10,
+        ("implement",),
+        "0" * 64,
+    )
+    grant = sign_grant("k", unsigned)
+    launcher = NvidiaClaudeLauncher("claude", "http://127.0.0.1:8082", "proxy-token")
+    edited = IssueSnapshot(
+        owner="cwall5640",
+        repo="fixture",
+        number=7,
+        title="Fix add",
+        body="edited after approval",
+        state="open",
+        updated_at="2026-11-08T01:00:00Z",
+        node_id="NODE1",
+    )
+    with pytest.raises(ApprovalInvalid):
+        launcher.run(
+            manifest,
+            tmp_path,
+            grant,
+            issue=edited,
+            grant_key="k",
+            now=1,
+            revocations=set(),
+            spawn=lambda *_args: None,
+        )
+    assert launcher.spawned is False
+    assert not (tmp_path / TASK_CARD_NAME).exists()
 
 
 def test_default_publisher_and_base_sha_guard(tmp_path: Path) -> None:

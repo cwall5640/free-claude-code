@@ -137,6 +137,25 @@ def test_candidate_without_grant_key_stays_ungranted(tmp_path, monkeypatch):
 
 # ---------- workflow behavior: grant file drives the model pass ----------
 
+class _IssueStub:
+    """Snapshot stand-in for the granted path: the launcher reads the
+    revision (to check it against the manifest) plus title/body for the
+    planted task card. The synthetic manifest's revision is "r" * 64."""
+
+    title = "test task"
+    body = "test task body"
+
+    def revision(self) -> str:
+        return "r" * 64
+
+
+class _ApiStub:
+    timeout = 5.0
+
+    def fetch_issue(self, owner: str, repo: str, number: int, *, timeout: float) -> _IssueStub:
+        return _IssueStub()
+
+
 def _candidate(tmp_path: Path, grants_dir: Path, *, now: int = 1_000) -> AssignmentCandidate:
     state = tmp_path / "state"
     secrets = tmp_path / "secrets" / "values"
@@ -146,7 +165,7 @@ def _candidate(tmp_path: Path, grants_dir: Path, *, now: int = 1_000) -> Assignm
         enabled=True,
         owner="cwall5640",
         repo="fixture",
-        api=object(),
+        api=_ApiStub(),
         paths=CandidatePaths(
             state_dir=state,
             source_repo=tmp_path,
