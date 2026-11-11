@@ -721,7 +721,11 @@ def _model_session_failure(
         return ModelSessionFailed(
             "model session ended without a result event", **evidence
         )
-    if result.get("is_error") or result.get("subtype") not in (None, "success"):
+    # Strict success: the result must explicitly say subtype "success" AND
+    # is_error False. A missing or malformed field is not a clean pass —
+    # accepting an absent subtype here would let a truncated or reshaped
+    # result event through (Cody, PR #32 review).
+    if result.get("is_error") is not False or result.get("subtype") != "success":
         return ModelSessionFailed(
             "model session ended with an error result", **evidence
         )

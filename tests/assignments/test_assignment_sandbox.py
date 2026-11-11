@@ -824,6 +824,46 @@ def test_launcher_rejects_a_session_without_a_result_event(
     assert "without a result event" in str(caught.value)
 
 
+def test_launcher_rejects_a_result_with_missing_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Success must be explicit (Cody, PR #32): a result event missing its
+    subtype, or missing is_error, is not a clean pass."""
+    launcher, manifest, grant = _granted_launcher()
+    payloads = (
+        '{"type":"result","is_error":false}\n',
+        '{"type":"result","subtype":"success"}\n',
+    )
+    for payload in payloads:
+
+        def fake_run(argv: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess:
+            return subprocess.CompletedProcess(argv, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(ModelSessionFailed):
+            launcher.run(manifest, tmp_path, grant, issue=_issue("probe"), grant_key="k", now=1, revocations=set())
+
+
+def test_launcher_skips_malformed_output_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-JSON and non-object lines in the stream are skipped; the final
+    well-formed success result still decides the outcome."""
+    launcher, manifest, grant = _granted_launcher()
+
+    def fake_run(argv: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess:
+        stdout = (
+            "not json at all\n"
+            '["a", "list"]\n'
+            '{"type":"result","subtype":"success","is_error":false}\n'
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    launcher.run(manifest, tmp_path, grant, issue=_issue("probe"), grant_key="k", now=1, revocations=set())
+    assert launcher.spawned is True
+
+
 def test_launcher_model_timeout_carries_partial_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1873,6 +1873,7 @@ def test_run_once_stops_when_the_model_session_fails(
             raise ModelSessionFailed(
                 "model session ended with an error result",
                 returncode=1,
+                stdout_tail="API Error: 500 provider timeout",
                 stderr_tail="boom",
             )
 
@@ -1885,6 +1886,10 @@ def test_run_once_stops_when_the_model_session_fails(
     assert result["logs"][0]["stage"] == "model"
     assert result["logs"][0]["error"] == "session_failed"
     assert result["logs"][0]["exit_code"] == 1
+    # Provider evidence lives in the stdout stream (Cody, PR #32): the stop
+    # log must carry it, not just stderr.
+    assert "API Error: 500" in result["logs"][0]["stdout"]
+    assert result["logs"][0]["stderr"] == "boom"
     assert result["repair_attempts"] == 0
     assert claim is not None and claim["status"] == "stopped"
     assert not (tmp_path / "run" / "workspace" / "src" / "check-ran.txt").exists()

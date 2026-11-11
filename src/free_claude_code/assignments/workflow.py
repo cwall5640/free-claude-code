@@ -842,6 +842,7 @@ class AssignmentCandidate:
                     {
                         "stage": "model",
                         "exit_code": None,
+                        "stdout": getattr(error, "stdout_tail", ""),
                         "stderr": getattr(error, "stderr_tail", ""),
                         "error": "timed_out",
                     }
@@ -864,6 +865,9 @@ class AssignmentCandidate:
                     {
                         "stage": "model",
                         "exit_code": error.returncode,
+                        # Provider error evidence lives in the stdout
+                        # stream-json, not stderr (run #13) — keep both.
+                        "stdout": error.stdout_tail,
                         "stderr": error.stderr_tail,
                         "error": "session_failed",
                     }
