@@ -595,6 +595,25 @@ def plant_task_card(workspace: Path, manifest: TaskManifest, issue: IssueSnapsho
     return target
 
 
+def scope_write_rules(manifest: TaskManifest) -> tuple[str, ...]:
+    """Claude Code Edit/Write permission rules for the signed scope.
+
+    Derived from the manifest's allowed prefixes at argv-build time, never
+    hardcoded: a file prefix (its final segment names a file, e.g.
+    ".gitignore") yields an exact-path rule; a directory prefix (e.g.
+    "changes") yields a recursive glob rule. Patterns are relative to the
+    model cwd, which is the workspace (see --add-dir).
+    """
+
+    rules: list[str] = []
+    for prefix in manifest.scope.allowed_prefixes:
+        leaf = prefix.rsplit("/", 1)[-1]
+        pattern = prefix if "." in leaf else f"{prefix}/**"
+        rules.append(f"Edit({pattern})")
+        rules.append(f"Write({pattern})")
+    return tuple(rules)
+
+
 def assignment_claude_argv(
     claude_bin: str, workspace: Path, manifest: TaskManifest
 ) -> tuple[str, ...]:
@@ -603,6 +622,13 @@ def assignment_claude_argv(
     The prompt is built from the signed manifest: it names the planted task
     card and lists the approved scope prefixes. The issue body is not copied
     onto argv; it reaches the model only as the planted card file (FCC #26).
+
+    The pass runs non-interactively (-p, permission mode default), so nobody
+    can approve a write at runtime: run #12 read the task and ended its turn
+    asking for write permission instead of editing. The argv therefore
+    pre-approves exactly the writes the signed scope allows — Edit/Write
+    rules derived from the manifest prefixes via --allowedTools — and
+    nothing else. No bypass flag, no accept-edits mode, no other tool.
     """
 
     prompt = (
@@ -624,6 +650,9 @@ def assignment_claude_argv(
         # The claude CLI rejects -p with stream-json unless --verbose is set
         # (live failure, FCC #19: the model pass exited before editing).
         "--verbose",
+        # One comma-separated value, the shape the repo's CLI matrix uses.
+        "--allowedTools",
+        ",".join(scope_write_rules(manifest)),
         "--add-dir",
         str(workspace),
     )
