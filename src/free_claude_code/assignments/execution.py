@@ -595,20 +595,29 @@ def plant_task_card(workspace: Path, manifest: TaskManifest, issue: IssueSnapsho
     return target
 
 
-def scope_write_rules(manifest: TaskManifest) -> tuple[str, ...]:
+def scope_write_rules(workspace: Path, manifest: TaskManifest) -> tuple[str, ...]:
     """Claude Code Edit/Write permission rules for the signed scope.
 
     Derived from the manifest's allowed prefixes at argv-build time, never
-    hardcoded: a file prefix (its final segment names a file, e.g.
-    ".gitignore") yields an exact-path rule; a directory prefix (e.g.
-    "changes") yields a recursive glob rule. Patterns are relative to the
-    model cwd, which is the workspace (see --add-dir).
+    hardcoded. Each prefix is typed by what it actually is in the
+    workspace: an existing directory yields a recursive glob rule (e.g.
+    "changes" -> "changes/**"); anything else yields an exact-path rule
+    (e.g. ".gitignore"). The final path segment's spelling is not a type —
+    a dotted name can be a directory and an extensionless name can be a
+    file ("Dockerfile") — so the rule never comes from the name (review
+    finding on PR #29).
+
+    A prefix that does not exist in the workspace yet fails closed to the
+    exact-path rule: a not-yet-existing prefix gets no recursive grant.
+    Typing here only shapes the model's pre-approved writes; the
+    publisher-side scope validation remains the hard enforcement of the
+    signed scope. Patterns are relative to the model cwd, which is the
+    workspace (see --add-dir).
     """
 
     rules: list[str] = []
     for prefix in manifest.scope.allowed_prefixes:
-        leaf = prefix.rsplit("/", 1)[-1]
-        pattern = prefix if "." in leaf else f"{prefix}/**"
+        pattern = f"{prefix}/**" if (workspace / prefix).is_dir() else prefix
         rules.append(f"Edit({pattern})")
         rules.append(f"Write({pattern})")
     return tuple(rules)
@@ -652,7 +661,7 @@ def assignment_claude_argv(
         "--verbose",
         # One comma-separated value, the shape the repo's CLI matrix uses.
         "--allowedTools",
-        ",".join(scope_write_rules(manifest)),
+        ",".join(scope_write_rules(workspace, manifest)),
         "--add-dir",
         str(workspace),
     )
