@@ -1895,6 +1895,108 @@ def test_run_once_stops_when_the_model_session_fails(
     assert not (tmp_path / "run" / "workspace" / "src" / "check-ran.txt").exists()
 
 
+def test_model_launcher_decodes_output_as_utf8_under_a_cp1252_locale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EXEC-DECODE-01: subprocess output capture must pin UTF-8 decoding.
+
+    Step-8 run #16 died about 35 seconds in on the Windows laptop, before
+    any edit: the output-capture sites in execution.py used text=True
+    with no encoding, so the captured stream decoded with the locale
+    codec (cp1252), and a UTF-8 byte that is undefined in cp1252 (0x90,
+    inside the fullwidth digit U+FF10) raised UnicodeDecodeError in the
+    subprocess reader thread. The launcher lost the session's result
+    event, PR #32's fail-closed inspection reported a dead session, and
+    the claim stopped. Runs #13-15 escaped only because their streams
+    happened to contain no cp1252-invalid byte.
+
+    The laptop's locale is simulated on any OS by pinning every seam
+    that resolves the platform default encoding to cp1252 while the
+    real launcher (spawn=None) drives a fake claude executable whose
+    success stream carries that exact byte. The pass must come back
+    clean; with the decoding unpinned the launcher raises
+    ModelSessionFailed instead.
+    """
+    import locale
+    import subprocess
+
+    from free_claude_code.assignments.execution import NvidiaClaudeLauncher
+
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    try:
+        candidate = _candidate(tmp_path, api, sha, _ok_script(tmp_path), name="decode")
+        # The same manifest the candidate's execute stage would build,
+        # fetched through its own service path (no pipeline side effects).
+        service = candidate._service(9, "dev")
+        manifest = service.fetch(candidate.owner, candidate.repo, 9, reader=candidate.api)
+        issue = candidate.api.fetch_issue(
+            manifest.owner,
+            manifest.repo,
+            manifest.issue_number,
+            timeout=candidate.api.timeout,
+        )
+    finally:
+        api.stop()
+
+    fake = tmp_path / "fake-claude"
+    fake.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import json, sys",
+                "events = [",
+                "    {'type': 'assistant', 'message': {'content': []}},",
+                "    {'type': 'result', 'subtype': 'success', 'is_error': False,",
+                "     'result': 'implemented step ' + chr(0xFF10)},",
+                "]",
+                "for event in events:",
+                "    line = json.dumps(event, ensure_ascii=False) + chr(10)",
+                "    sys.stdout.buffer.write(line.encode('utf-8'))",
+                "sys.stdout.buffer.flush()",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    workspace = tmp_path / "decode-workspace"
+    (workspace / "src").mkdir(parents=True)
+    grant = sign_grant(
+        "grant-key",
+        ModelGrant(
+            manifest.manifest_id,
+            f"{manifest.owner}/{manifest.repo}",
+            manifest.base_sha,
+            manifest.issue_revision,
+            5_000,
+            ("implement",),
+            "",
+        ),
+    )
+    launcher = NvidiaClaudeLauncher(str(fake), "http://127.0.0.1:8082", "proxy-token")
+    # Simulate the laptop's cp1252 platform default at every seam the
+    # interpreter consults for it: locale.getpreferredencoding (the
+    # classic API), locale.getencoding (3.11+), and subprocess's own
+    # default-encoding resolution, which on the pinned 3.14 interpreter
+    # short-circuits before the locale when UTF-8 mode is on.
+    monkeypatch.setattr(locale, "getpreferredencoding", lambda *args, **kwargs: "cp1252")
+    monkeypatch.setattr(locale, "getencoding", lambda: "cp1252")
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+    launcher.run(
+        manifest,
+        workspace,
+        grant,
+        issue=issue,
+        grant_key="grant-key",
+        now=1_000,
+        revocations=set(),
+        spawn=None,
+    )
+    assert launcher.spawned
+
+
 def _setup_marker_script(tmp: Path) -> Path:
     path = tmp / "setup-marker.py"
     path.write_text(
