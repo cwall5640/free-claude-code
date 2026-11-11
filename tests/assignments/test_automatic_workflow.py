@@ -1820,6 +1820,81 @@ def test_run_once_enforces_configured_command_timeout(tmp_path: Path) -> None:
     assert claim is not None and claim["status"] == "stopped"
 
 
+def test_run_once_stops_when_the_model_session_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FCC #30: a model session that ends abnormally stops the run at the
+    model stage. The check command never runs on a dead session, no repair
+    attempt is consumed, and the claim is released as stopped with the
+    session evidence in the logs."""
+    from free_claude_code.assignments.errors import ModelSessionFailed
+    from free_claude_code.assignments.execution import NvidiaClaudeLauncher
+
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    marker_script = tmp_path / "check-marker.py"
+    marker_script.write_text(
+        "import pathlib\npathlib.Path('check-ran.txt').write_text('ran')\n",
+        encoding="utf-8",
+    )
+    api = FixtureApi(sha)
+    try:
+        candidate = _candidate(tmp_path, api, sha, marker_script)
+        write_secret_file(
+            candidate.paths.secrets_file,
+            {
+                "github_read": "read-token",
+                "github_ci": "ci-token",
+                "github_publish": PUBLISH,
+                "grant_key": "grant-key",
+                "proxy_auth": "proxy-from-secret-file",
+            },
+        )
+        candidate.grant_key = "grant-key"
+        candidate.now = 1_000
+
+        def factory(manifest: object) -> ModelGrant:
+            return sign_grant(
+                "grant-key",
+                ModelGrant(
+                    manifest.manifest_id,
+                    f"{manifest.owner}/{manifest.repo}",
+                    manifest.base_sha,
+                    manifest.issue_revision,
+                    5_000,
+                    ("implement",),
+                    "",
+                ),
+            )
+
+        candidate.model_grant_factory = factory
+
+        def failing_run(self: object, *_args: object, **_kwargs: object) -> None:
+            raise ModelSessionFailed(
+                "model session ended with an error result",
+                returncode=1,
+                stdout_tail="API Error: 500 provider timeout",
+                stderr_tail="boom",
+            )
+
+        monkeypatch.setattr(NvidiaClaudeLauncher, "run", failing_run)
+        result = candidate.run_once()
+        claim = candidate.ledger.get(candidate._key(9))
+    finally:
+        api.stop()
+    assert result["status"] == "stopped"
+    assert result["logs"][0]["stage"] == "model"
+    assert result["logs"][0]["error"] == "session_failed"
+    assert result["logs"][0]["exit_code"] == 1
+    # Provider evidence lives in the stdout stream (Cody, PR #32): the stop
+    # log must carry it, not just stderr.
+    assert "API Error: 500" in result["logs"][0]["stdout"]
+    assert result["logs"][0]["stderr"] == "boom"
+    assert result["repair_attempts"] == 0
+    assert claim is not None and claim["status"] == "stopped"
+    assert not (tmp_path / "run" / "workspace" / "src" / "check-ran.txt").exists()
+
+
 def _setup_marker_script(tmp: Path) -> Path:
     path = tmp / "setup-marker.py"
     path.write_text(

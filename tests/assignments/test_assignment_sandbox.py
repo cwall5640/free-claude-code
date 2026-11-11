@@ -16,6 +16,7 @@ from free_claude_code.assignments.errors import (
     Disabled,
     Forbidden,
     MergeRejected,
+    ModelSessionFailed,
     PublicationBlocked,
     ScopeError,
     TimedOut,
@@ -27,6 +28,7 @@ from free_claude_code.assignments.execution import (
     CommandEvidence,
     GitWorkspace,
     NarrowPublisher,
+    MODEL_TIMEOUT_SECONDS,
     NativeCommandApproval,
     NvidiaClaudeLauncher,
     Sandbox,
@@ -716,6 +718,168 @@ def test_launcher_argv_carries_the_scope_allowlist(tmp_path: Path) -> None:
     assert isinstance(argv, tuple)
     assert _allowed_tools(argv) == ["Edit(src/**)", "Write(src/**)"]
     assert "--dangerously-skip-permissions" not in argv
+
+
+def _granted_launcher() -> tuple[NvidiaClaudeLauncher, object, object]:
+    from free_claude_code.assignments.grants import ModelGrant, sign_grant
+
+    manifest = _manifest_for_probe()
+    unsigned = ModelGrant(
+        manifest.manifest_id,
+        f"{manifest.owner}/{manifest.repo}",
+        manifest.base_sha,
+        manifest.issue_revision,
+        10,
+        ("implement",),
+        "0" * 64,
+    )
+    launcher = NvidiaClaudeLauncher(sys.executable, "http://127.0.0.1:8082", "proxy-token")
+    return launcher, manifest, sign_grant("k", unsigned)
+
+
+def test_launcher_accepts_a_clean_model_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FCC #30: the real spawn path inspects the session's result. A pass
+    that exits 0 and ends with a success result event is accepted, and the
+    wait on the CLI is bounded and captured."""
+    launcher, manifest, grant = _granted_launcher()
+    calls: dict[str, object] = {}
+
+    def fake_run(argv: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess:
+        calls.update(kwargs)
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout='{"type":"result","subtype":"success","is_error":false}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    launcher.run(manifest, tmp_path, grant, issue=_issue("probe"), grant_key="k", now=1, revocations=set())
+    assert launcher.spawned is True
+    assert calls["capture_output"] is True
+    assert calls["timeout"] == MODEL_TIMEOUT_SECONDS
+
+
+def test_launcher_rejects_a_provider_error_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FCC #30, step-8 run #13: the provider died with an API 500 after the
+    edits. The session's error result and nonzero exit must surface as a
+    ModelSessionFailed carrying the evidence — not as a finished pass."""
+    launcher, manifest, grant = _granted_launcher()
+
+    def fake_run(argv: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            stdout='{"type":"result","subtype":"error","is_error":true,"result":"API Error: 500"}\n',
+            stderr="boom",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(ModelSessionFailed) as caught:
+        launcher.run(manifest, tmp_path, grant, issue=_issue("probe"), grant_key="k", now=1, revocations=set())
+    assert caught.value.returncode == 1
+    assert "API Error: 500" in caught.value.stdout_tail
+    assert caught.value.stderr_tail == "boom"
+    assert launcher.spawned is True
+
+
+def test_launcher_rejects_an_error_result_with_a_zero_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An error result is abnormal even when the CLI exits 0."""
+    launcher, manifest, grant = _granted_launcher()
+
+    def fake_run(argv: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout='{"type":"result","subtype":"error","is_error":true}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(ModelSessionFailed):
+        launcher.run(manifest, tmp_path, grant, issue=_issue("probe"), grant_key="k", now=1, revocations=set())
+
+
+def test_launcher_rejects_a_session_without_a_result_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session that dies mid-stream leaves no result event; that is not
+    a completed pass even at exit 0."""
+    launcher, manifest, grant = _granted_launcher()
+
+    def fake_run(argv: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            argv, 0, stdout='{"type":"system","subtype":"init"}\n', stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(ModelSessionFailed) as caught:
+        launcher.run(manifest, tmp_path, grant, issue=_issue("probe"), grant_key="k", now=1, revocations=set())
+    assert "without a result event" in str(caught.value)
+
+
+def test_launcher_rejects_a_result_with_missing_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Success must be explicit (Cody, PR #32): a result event missing its
+    subtype, or missing is_error, is not a clean pass."""
+    launcher, manifest, grant = _granted_launcher()
+    payloads = (
+        '{"type":"result","is_error":false}\n',
+        '{"type":"result","subtype":"success"}\n',
+    )
+    for payload in payloads:
+
+        def fake_run(argv: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess:
+            return subprocess.CompletedProcess(argv, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(ModelSessionFailed):
+            launcher.run(manifest, tmp_path, grant, issue=_issue("probe"), grant_key="k", now=1, revocations=set())
+
+
+def test_launcher_skips_malformed_output_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-JSON and non-object lines in the stream are skipped; the final
+    well-formed success result still decides the outcome."""
+    launcher, manifest, grant = _granted_launcher()
+
+    def fake_run(argv: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess:
+        stdout = (
+            "not json at all\n"
+            '["a", "list"]\n'
+            '{"type":"result","subtype":"success","is_error":false}\n'
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    launcher.run(manifest, tmp_path, grant, issue=_issue("probe"), grant_key="k", now=1, revocations=set())
+    assert launcher.spawned is True
+
+
+def test_launcher_model_timeout_carries_partial_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hung CLI is killed at the model timeout and surfaces as TimedOut
+    with whatever it printed, mirroring the sandbox rule (FCC #20)."""
+    launcher, manifest, grant = _granted_launcher()
+
+    def fake_run(argv: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess:
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"), output="partial out", stderr="partial err")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(TimedOut) as caught:
+        launcher.run(manifest, tmp_path, grant, issue=_issue("probe"), grant_key="k", now=1, revocations=set())
+    assert caught.value.stdout_tail == "partial out"
+    assert caught.value.stderr_tail == "partial err"
+    assert launcher.spawned is True
 
 
 def test_launcher_refuses_an_issue_that_changed_after_approval(

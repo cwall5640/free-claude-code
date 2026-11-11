@@ -33,6 +33,7 @@ from free_claude_code.assignments.errors import (
     Disabled,
     Forbidden,
     MergeRejected,
+    ModelSessionFailed,
     TimedOut,
 )
 from free_claude_code.assignments.execution import (
@@ -828,7 +829,67 @@ class AssignmentCandidate:
                 self.ledger.update(key, status="stopped", repairs=repairs)
                 return {"status": "stopped", "repair_attempts": repairs, "logs": logs}
         while True:
-            self._run_model_if_granted(manifest, child_env)
+            try:
+                self._run_model_if_granted(manifest, child_env)
+            except Forbidden:
+                self.ledger.update(key, status="blocked", repairs=repairs)
+                raise
+            except TimedOut as error:
+                # A model-stage timeout is an environment outcome, not a
+                # code failure: no repair attempt, claim stops with the
+                # partial output recorded (same semantics as FCC #20).
+                logs.append(
+                    {
+                        "stage": "model",
+                        "exit_code": None,
+                        "stdout": getattr(error, "stdout_tail", ""),
+                        "stderr": getattr(error, "stderr_tail", ""),
+                        "error": "timed_out",
+                    }
+                )
+                self.ledger.update(key, status="stopped", repairs=repairs)
+                return {
+                    "status": "stopped",
+                    "repair_attempts": repairs,
+                    "logs": logs,
+                    "head_sha": workspace.head(),
+                    "merged": False,
+                }
+            except ModelSessionFailed as error:
+                # FCC #30 (step-8 run #13): the session ended abnormally —
+                # a provider API error after the edits were on disk. The
+                # edits do not make the pass complete; stop with the
+                # evidence instead of burning the check stage on a dead
+                # session. Consumes no repair attempt.
+                logs.append(
+                    {
+                        "stage": "model",
+                        "exit_code": error.returncode,
+                        # Provider error evidence lives in the stdout
+                        # stream-json, not stderr (run #13) — keep both.
+                        "stdout": error.stdout_tail,
+                        "stderr": error.stderr_tail,
+                        "error": "session_failed",
+                    }
+                )
+                self.ledger.update(key, status="stopped", repairs=repairs)
+                return {
+                    "status": "stopped",
+                    "repair_attempts": repairs,
+                    "logs": logs,
+                    "head_sha": workspace.head(),
+                    "merged": False,
+                }
+            except OSError:
+                logs.append({"stage": "model", "exit_code": None, "stderr": "", "error": "start_failed"})
+                self.ledger.update(key, status="stopped", repairs=repairs)
+                return {
+                    "status": "stopped",
+                    "repair_attempts": repairs,
+                    "logs": logs,
+                    "head_sha": workspace.head(),
+                    "merged": False,
+                }
             try:
                 evidence = sandbox.run(
                     NativeCommandApproval(manifest.manifest_id, self.allowed_command, attestation.principal_id),
