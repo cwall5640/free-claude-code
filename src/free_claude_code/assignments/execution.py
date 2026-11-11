@@ -6,6 +6,7 @@ GitHub credential. Publication tokens stay on the publisher object and are
 not copied into command environments. Merge is not implemented.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -21,6 +22,7 @@ from free_claude_code.assignments.errors import (
     Conflict,
     Forbidden,
     MergeRejected,
+    ModelSessionFailed,
     ScopeError,
     TimedOut,
 )
@@ -667,6 +669,65 @@ def assignment_claude_argv(
     )
 
 
+# A model pass legitimately runs for minutes (the sandbox command timeout
+# is the same order), but it must be bounded: before FCC #30 the launcher
+# waited on the CLI forever and discarded its result entirely.
+MODEL_TIMEOUT_SECONDS = 1800.0
+
+
+def _as_text(value: object) -> str:
+    """TimeoutExpired carries partial output as bytes even in text mode."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _model_session_failure(
+    returncode: int | None, stdout: str, stderr: str
+) -> ModelSessionFailed | None:
+    """Describe an abnormal model-session end, or None for a clean pass.
+
+    A clean non-interactive pass exits 0 and ends its stream-json output
+    with a result event whose subtype is "success" and whose is_error flag
+    is false. Anything else means the session did not complete, whatever
+    edits happen to be on disk: a nonzero exit, a missing result event, or
+    an error result — the shape a provider/API failure takes (FCC #30,
+    step-8 run #13: an NVIDIA 500 timeout landed after the edits, and the
+    worker sailed on into the check stage because nobody looked).
+    """
+    result: dict[str, object] | None = None
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            result = event
+    evidence = {
+        "returncode": returncode,
+        "stdout_tail": redact(stdout)[-2000:],
+        "stderr_tail": redact(stderr)[-2000:],
+    }
+    if returncode != 0:
+        return ModelSessionFailed(
+            f"model session exited with code {returncode}", **evidence
+        )
+    if result is None:
+        return ModelSessionFailed(
+            "model session ended without a result event", **evidence
+        )
+    if result.get("is_error") or result.get("subtype") not in (None, "success"):
+        return ModelSessionFailed(
+            "model session ended with an error result", **evidence
+        )
+    return None
+
+
 class NvidiaClaudeLauncher:
     """Spawn the reviewed FCC Claude environment only for a signed grant.
 
@@ -734,10 +795,39 @@ class NvidiaClaudeLauncher:
             program = resolve_program(argv[0])
             if not Path(program).is_file():
                 raise Forbidden("claude binary is not available")
-            subprocess.run((program, *argv[1:]), cwd=str(directory), env=env, shell=False, check=False)
+            try:
+                completed = subprocess.run(
+                    (program, *argv[1:]),
+                    cwd=str(directory),
+                    env=env,
+                    shell=False,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=MODEL_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as error:
+                # Same evidence rule as the sandbox (FCC #20): a timeout is
+                # an environment outcome, and the partial output is carried
+                # on the exception so the stop record keeps it.
+                self.spawned = True
+                timed_out = TimedOut("model session exceeded its timeout")
+                timed_out.stdout_tail = redact(_as_text(error.stdout))[-2000:]
+                timed_out.stderr_tail = redact(_as_text(error.stderr))[-2000:]
+                raise timed_out from error
+            self.spawned = True
+            # The result used to be discarded (check=False, no inspection):
+            # a session that died on a provider error looked exactly like a
+            # finished one, and the run continued into the check stage on a
+            # dead session (FCC #30, step-8 run #13). Inspect it.
+            failure = _model_session_failure(
+                completed.returncode, completed.stdout or "", completed.stderr or ""
+            )
+            if failure is not None:
+                raise failure
         else:
             spawn(argv, env, directory)
-        self.spawned = True
+            self.spawned = True
 
 
 def apply_scoped_write(
