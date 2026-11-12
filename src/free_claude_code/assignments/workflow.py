@@ -738,7 +738,7 @@ class AssignmentCandidate:
         grants_dir: Path | None = None,
         model_proxy_base_url: str = "http://127.0.0.1:8082",
         repair_limit: int = REPAIR_LIMIT,
-        awake_seconds: float = 30.0,
+        awake_seconds: float = 7200.0,  # AWAKE-01: sane default matched to live.AWAKE_SECONDS_DEFAULT; the old 30s default masked run results
         identity: WorkerIdentity | None = None,
     ) -> None:
         self.enabled = enabled

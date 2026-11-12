@@ -31,6 +31,13 @@ POLL_INTERVAL_SECONDS = 30.0
 POLL_LIMIT = 20
 COMMAND_TIMEOUT_SECONDS = 10.0
 COMMAND_TIMEOUT_MAX_SECONDS = 3600.0
+# AWAKE-01: the awake budget bounds one whole run (setup + model + check +
+# publish). The check alone may run COMMAND_TIMEOUT_MAX_SECONDS, so the
+# default must sit well above that; the old candidate default of 30s was
+# never wired through here and masked every run's result summary.
+AWAKE_SECONDS_DEFAULT = 7200.0
+AWAKE_SECONDS_MIN = 60.0
+AWAKE_SECONDS_MAX = 14400.0
 KILL_NAME = "KILL"
 _QUIET = frozenset(
     {
@@ -152,6 +159,15 @@ def _runtime(config: Path) -> dict[str, object]:
         or timeout > COMMAND_TIMEOUT_MAX_SECONDS
     ):
         raise Forbidden("runtime command timeout is out of bounds")
+    awake = raw.get("awake_seconds", AWAKE_SECONDS_DEFAULT)
+    if (
+        isinstance(awake, bool)
+        or not isinstance(awake, (int, float))
+        or not math.isfinite(awake)
+        or awake < AWAKE_SECONDS_MIN
+        or awake > AWAKE_SECONDS_MAX
+    ):
+        raise Forbidden("runtime awake budget is out of bounds")
     # EXEC-RETRY-01 (Producer decision, Casey, 2026-11-11): the failed-test
     # re-run inside the check stage is authorized only by this explicit
     # opt-in — absent or false by default, so every existing configuration
@@ -173,6 +189,7 @@ def _runtime(config: Path) -> dict[str, object]:
         "allowed_command": tuple(command),
         "setup_command": tuple(setup_command) if setup_command is not None else None,
         "command_timeout_seconds": float(timeout),
+        "awake_seconds": float(awake),
         "allow_failed_test_rerun": failed_rerun,
         "allowed_path_prefixes": allowed_path_prefixes,
         "audience": str(raw.get("audience", "")).strip(),
@@ -237,6 +254,7 @@ def _candidate(state: Path, config: Path, runtime: dict[str, object]) -> Assignm
         allowed_path_prefixes=tuple(runtime["allowed_path_prefixes"]),
         command_timeout_seconds=float(runtime["command_timeout_seconds"]),
         allow_failed_test_rerun=bool(runtime.get("allow_failed_test_rerun", False)),
+        awake_seconds=float(runtime.get("awake_seconds", AWAKE_SECONDS_DEFAULT)),
         grants_dir=state / "grants",
         setup_command=tuple(runtime["setup_command"]) if runtime["setup_command"] else None,
         repair_limit=REPAIR_LIMIT,
