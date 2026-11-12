@@ -180,6 +180,28 @@ def vet_command(argv: Sequence[str], allowed: Sequence[Sequence[str]]) -> tuple[
     return frozen
 
 
+LAST_FAILED_FLAG = "--last-failed"
+
+
+def failed_rerun_command(argv: Sequence[str]) -> tuple[str, ...]:
+    """Derive the failed-tests re-run argv from a configured check command.
+
+    EXEC-RETRY-01 (Producer flake policy, 2026-11-11): the re-run is the
+    configured command plus Playwright's --last-failed flag, which re-runs
+    exactly the tests recorded as failed in test-results/.last-run.json.
+    The derivation happens here, in trusted code, from the already-approved
+    command — never from issue text — so a sandbox that admits the result
+    admits exactly one extra argv: the configured command with this one
+    fixed flag appended. Any other variation still fails vet_command's
+    exact match.
+    """
+
+    frozen = tuple(argv)
+    if not frozen:
+        raise Forbidden("empty command")
+    return (*frozen, LAST_FAILED_FLAG)
+
+
 def scrub_env(source: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in source.items() if key not in _SECRET_ENV}
 

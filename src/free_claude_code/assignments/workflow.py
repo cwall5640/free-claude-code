@@ -40,6 +40,7 @@ from free_claude_code.assignments.execution import (
     GitWorkspace,
     NativeCommandApproval,
     Sandbox,
+    failed_rerun_command,
     resolve_program,
     scrub_env,
 )
@@ -512,6 +513,27 @@ def assert_reviewer_is_not_author(*, author_login: str, reviewer_login: str) -> 
         raise Forbidden("author cannot review their own pull request")
 
 
+def _recorded_failed_tests(command_root: Path) -> tuple[str, ...]:
+    """Failed test ids the check tool recorded for the pass that just failed.
+
+    Playwright writes test-results/.last-run.json under its working
+    directory on every run; its failedTests list is exactly what
+    --last-failed would re-run. A missing or malformed record means the
+    failure was not a recorded test failure, and the caller keeps the
+    existing behavior for it.
+    """
+
+    try:
+        loaded = json.loads(
+            (command_root / "test-results" / ".last-run.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return ()
+    if not isinstance(loaded, dict) or not isinstance(loaded.get("failedTests"), list):
+        return ()
+    return tuple(item for item in loaded["failedTests"] if isinstance(item, str))
+
+
 def _comment_payload(body: str) -> bytes:
     lines = [
         line
@@ -792,7 +814,15 @@ class AssignmentCandidate:
         self._publish_token = publish_token
         if publish_token in child_env.values() or any(name in child_env for name in PUBLISHER_ENV):
             raise Forbidden("publisher credential reached a child environment")
-        sandbox = Sandbox(command_root, allowed=(self.allowed_command,), timeout_seconds=self.command_timeout_seconds)
+        # EXEC-RETRY-01: the check sandbox also admits exactly one derived
+        # argv — the configured command plus --last-failed, built by trusted
+        # code (failed_rerun_command) from the approved command. Nothing
+        # else is admitted; vet_command still exact-matches every call.
+        sandbox = Sandbox(
+            command_root,
+            allowed=(self.allowed_command, failed_rerun_command(self.allowed_command)),
+            timeout_seconds=self.command_timeout_seconds,
+        )
         bound_setup = tuple(manifest.scope.setup_command)
         if tuple(self.setup_command or ()) != bound_setup:
             # The manifest is the approval record: its id binds the exact
@@ -936,6 +966,97 @@ class AssignmentCandidate:
             logs.append({"stage": "test", "exit_code": code, "stderr": evidence.stderr_tail})
             if code == 0:
                 break
+            failed_tests = _recorded_failed_tests(command_root)
+            if failed_tests:
+                # EXEC-RETRY-01 (Producer flake policy, 2026-11-11): the
+                # first pass completed and failed with recorded test
+                # failures, so the failed tests get exactly one re-run
+                # inside this check stage (Playwright --last-failed). The
+                # re-run goes through the same sandbox, so the configured
+                # per-command timeout bounds it independently — the stage's
+                # worst case is two bounded invocations, and the re-run
+                # covers only the failed subset. Timeouts and start
+                # failures keep the check stage's existing stop semantics
+                # and are never re-run. A re-run pass replaces the stage
+                # result (the run proceeds exactly as a first-pass pass);
+                # a re-run failure stops the claim with no repair consumed —
+                # a model repair pass cannot fix a flake, so the repair
+                # loop below stays reserved for failures that recorded no
+                # failed tests. Both attempts land in the stage logs: the
+                # "test" entry carries the first pass and its failed-test
+                # count, the "test_rerun" entry the re-run's own result, so
+                # a flake-pass is distinguishable from a clean pass.
+                logs[-1]["failed_tests"] = len(failed_tests)
+                try:
+                    rerun_evidence = sandbox.run(
+                        NativeCommandApproval(
+                            manifest.manifest_id,
+                            failed_rerun_command(self.allowed_command),
+                            attestation.principal_id,
+                        ),
+                        manifest=manifest,
+                        head_sha=workspace.head(),
+                        env=child_env,
+                    )
+                except Forbidden:
+                    self.ledger.update(key, status="blocked", repairs=repairs)
+                    raise
+                except TimedOut as error:
+                    logs.append(
+                        {
+                            "stage": "test_rerun",
+                            "exit_code": None,
+                            "stderr": getattr(error, "stderr_tail", ""),
+                            "error": "timed_out",
+                            "failed_tests": len(failed_tests),
+                        }
+                    )
+                    self.ledger.update(key, status="stopped", repairs=repairs)
+                    return {
+                        "status": "stopped",
+                        "repair_attempts": repairs,
+                        "logs": logs,
+                        "head_sha": workspace.head(),
+                        "merged": False,
+                    }
+                except OSError:
+                    logs.append(
+                        {
+                            "stage": "test_rerun",
+                            "exit_code": None,
+                            "stderr": "",
+                            "error": "start_failed",
+                            "failed_tests": len(failed_tests),
+                        }
+                    )
+                    self.ledger.update(key, status="stopped", repairs=repairs)
+                    return {
+                        "status": "stopped",
+                        "repair_attempts": repairs,
+                        "logs": logs,
+                        "head_sha": workspace.head(),
+                        "merged": False,
+                    }
+                rerun_code = rerun_evidence.returncode if rerun_evidence.returncode is not None else 1
+                logs.append(
+                    {
+                        "stage": "test_rerun",
+                        "exit_code": rerun_code,
+                        "stderr": rerun_evidence.stderr_tail,
+                        "failed_tests": len(failed_tests),
+                    }
+                )
+                if rerun_code == 0:
+                    evidence = rerun_evidence
+                    break
+                self.ledger.update(key, status="stopped", repairs=repairs)
+                return {
+                    "status": "stopped",
+                    "repair_attempts": repairs,
+                    "logs": logs,
+                    "head_sha": workspace.head(),
+                    "merged": False,
+                }
             if repairs >= self.repair_limit:
                 self.ledger.update(key, status="stopped", repairs=repairs)
                 return {

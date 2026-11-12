@@ -2294,3 +2294,218 @@ def test_check_timeout_stops_with_evidence_and_no_repair_spent(tmp_path: Path) -
     assert "check-started" in result["logs"][0]["stderr"]
     assert claim is not None and claim["status"] == "stopped"
     assert claim.get("repairs", 0) == 0
+
+
+# --- EXEC-RETRY-01: one failed-test re-run inside the check stage ---------
+#
+# Producer flake policy (Casey, 2026-11-11), from step-8 run #17: the full
+# suite failed on exactly one previously-verified flake (the WebKit
+# prologue e2e, failed id fa85b1d47b6948abc0d0-0f2879488810f3678cdf) and the
+# claim stopped with no PR. The fakes below stand in for Playwright: the
+# first pass records its failed tests in test-results/.last-run.json and
+# exits 1; an invocation carrying --last-failed is the re-run. Every
+# invocation's argv is appended to invocations.jsonl in the command cwd so
+# the tests can count invocations and inspect the exact re-run argv. The
+# scripts run under sys.executable (no shebang execution), so the tests are
+# portable to Windows per the PR #34 lesson.
+
+_FLAKE_ID = "fa85b1d47b6948abc0d0-0f2879488810f3678cdf"
+
+
+def _playwright_script(tmp: Path, *, rerun_mode: str = "pass") -> Path:
+    if rerun_mode == "pass":
+        rerun_lines = "    raise SystemExit(0)\n"
+    elif rerun_mode == "fail":
+        rerun_lines = "    raise SystemExit(1)\n"
+    elif rerun_mode == "sleep":
+        rerun_lines = "    import time\n    time.sleep(5)\n    raise SystemExit(0)\n"
+    else:  # pragma: no cover - fixture misuse
+        raise ValueError(rerun_mode)
+    path = tmp / f"playwright-{rerun_mode}.py"
+    path.write_text(
+        "import json, pathlib, sys\n"
+        "argv = sys.argv[1:]\n"
+        "with pathlib.Path('invocations.jsonl').open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps(argv) + '\\n')\n"
+        "if '--last-failed' in argv:\n"
+        + rerun_lines
+        + "pathlib.Path('widget.py').write_text("
+        "'def scale(value, factor):\\n    return value * factor\\n', encoding='utf-8')\n"
+        "record = pathlib.Path('test-results')\n"
+        "record.mkdir(exist_ok=True)\n"
+        "(record / '.last-run.json').write_text(json.dumps("
+        "{'status': 'failed', 'failedTests': ['" + _FLAKE_ID + "']}), encoding='utf-8')\n"
+        "print('1 failed', file=sys.stderr)\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _invocations(tmp: Path, name: str = "run") -> list[list[str]]:
+    raw = (tmp / name / "workspace" / "src" / "invocations.jsonl").read_text(encoding="utf-8")
+    return [json.loads(line) for line in raw.splitlines()]
+
+
+def _origin_ignoring_test_results(tmp: Path) -> str:
+    """_origin plus the game repo's own rule, verified at the run #17 base:
+    its .gitignore already lists test-results/, so git status never reports
+    the directory Playwright writes. The bare fixture needs the same rule —
+    an untracked directory entry makes changed_paths raise ScopeError."""
+    _origin(tmp)
+    origin = tmp / "origin"
+    (origin / ".gitignore").write_text("test-results/\n", encoding="utf-8")
+    _git(origin, "add", ".gitignore")
+    _git(origin, "commit", "-m", "ignore playwright results")
+    return _git(origin, "rev-parse", "HEAD")
+
+
+def test_failed_rerun_command_is_the_configured_command_plus_last_failed() -> None:
+    from free_claude_code.assignments.execution import failed_rerun_command, vet_command
+
+    configured = ("npx.cmd", "playwright", "test", "--reporter=list", "--workers=1")
+    derived = failed_rerun_command(configured)
+    assert derived == (*configured, "--last-failed")
+    # The check sandbox admits exactly the configured command and its one
+    # derived re-run; any other variation still fails the exact match.
+    allowed = (configured, derived)
+    assert vet_command(configured, allowed) == configured
+    assert vet_command(derived, allowed) == derived
+    with pytest.raises(Forbidden):
+        vet_command((*configured, "--watch"), allowed)
+    with pytest.raises(Forbidden):
+        vet_command(("--last-failed", *configured), allowed)
+    with pytest.raises(Forbidden):
+        vet_command(derived, (configured,))
+
+
+def test_check_rerun_of_recorded_failures_passes_and_run_proceeds(tmp_path: Path) -> None:
+    sha = _origin_ignoring_test_results(tmp_path)
+    api = FixtureApi(sha)
+    git_remote = GitHttps(tmp_path / "git-remote", PUBLISH)
+    try:
+        candidate = _candidate(
+            tmp_path, api, sha, _playwright_script(tmp_path, rerun_mode="pass"), publish=git_remote
+        )
+        result = _run_published(candidate, git_remote)
+    finally:
+        api.stop()
+        git_remote.stop()
+    assert result["status"] == "returned_for_review"
+    assert result["repair_attempts"] == 0
+    # Both attempts are in the stage logs: the first pass failed with one
+    # recorded failed test, the re-run passed — a flake-pass, visibly not
+    # a clean first-pass pass.
+    assert [(entry["stage"], entry["exit_code"]) for entry in result["logs"]] == [
+        ("test", 1),
+        ("test_rerun", 0),
+    ]
+    assert result["logs"][0]["failed_tests"] == 1
+    assert result["logs"][1]["failed_tests"] == 1
+    # Exactly two invocations: the configured command, then the same
+    # command plus --last-failed.
+    assert _invocations(tmp_path) == [[], ["--last-failed"]]
+
+
+def test_check_rerun_failure_stops_the_claim_with_no_repair_consumed(tmp_path: Path) -> None:
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    try:
+        candidate = _candidate(
+            tmp_path, api, sha, _playwright_script(tmp_path, rerun_mode="fail")
+        )
+        result = candidate.run_once()
+        claim = candidate.ledger.get(candidate._key(9))
+    finally:
+        api.stop()
+    assert result["status"] == "stopped"
+    assert result["repair_attempts"] == 0
+    assert [(entry["stage"], entry["exit_code"]) for entry in result["logs"]] == [
+        ("test", 1),
+        ("test_rerun", 1),
+    ]
+    assert claim is not None and claim["status"] == "stopped"
+    assert claim.get("repairs", 0) == 0
+    # The re-run happened exactly once; the claim stopped instead of
+    # looping into a model repair pass.
+    assert _invocations(tmp_path) == [[], ["--last-failed"]]
+
+
+def test_check_first_pass_pass_never_triggers_a_rerun(tmp_path: Path) -> None:
+    sha = _origin_ignoring_test_results(tmp_path)
+    api = FixtureApi(sha)
+    git_remote = GitHttps(tmp_path / "git-remote", PUBLISH)
+    try:
+        candidate = _candidate(tmp_path, api, sha, _passing_check_script(tmp_path), publish=git_remote)
+        result = _run_published(candidate, git_remote)
+    finally:
+        api.stop()
+        git_remote.stop()
+    assert result["status"] == "returned_for_review"
+    assert [entry["stage"] for entry in result["logs"]] == ["test"]
+    assert _invocations(tmp_path) == [[]]
+
+
+def _passing_check_script(tmp: Path) -> Path:
+    path = tmp / "playwright-pass.py"
+    path.write_text(
+        "import json, pathlib, sys\n"
+        "with pathlib.Path('invocations.jsonl').open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "pathlib.Path('widget.py').write_text("
+        "'def scale(value, factor):\\n    return value * factor\\n', encoding='utf-8')\n"
+        "raise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_check_timeout_never_triggers_a_rerun(tmp_path: Path) -> None:
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    try:
+        slow = tmp_path / "playwright-slow.py"
+        slow.write_text(
+            "import json, pathlib, sys, time\n"
+            "with pathlib.Path('invocations.jsonl').open('a', encoding='utf-8') as handle:\n"
+            "    handle.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "time.sleep(5)\n",
+            encoding="utf-8",
+        )
+        candidate = _candidate(tmp_path, api, sha, slow)
+        candidate.command_timeout_seconds = 1
+        result = candidate.run_once()
+    finally:
+        api.stop()
+    assert result["status"] == "stopped"
+    assert result["repair_attempts"] == 0
+    assert result["logs"][0]["stage"] == "test"
+    assert result["logs"][0]["error"] == "timed_out"
+    # A hung suite is not retried: exactly one invocation, no re-run.
+    assert _invocations(tmp_path) == [[]]
+
+
+def test_check_rerun_timeout_stops_the_claim_with_no_repair_consumed(tmp_path: Path) -> None:
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    try:
+        candidate = _candidate(
+            tmp_path, api, sha, _playwright_script(tmp_path, rerun_mode="sleep")
+        )
+        candidate.command_timeout_seconds = 1
+        result = candidate.run_once()
+        claim = candidate.ledger.get(candidate._key(9))
+    finally:
+        api.stop()
+    assert result["status"] == "stopped"
+    assert result["repair_attempts"] == 0
+    assert [(entry["stage"], entry.get("error")) for entry in result["logs"]] == [
+        ("test", None),
+        ("test_rerun", "timed_out"),
+    ]
+    assert claim is not None and claim["status"] == "stopped"
+    assert claim.get("repairs", 0) == 0
+    assert _invocations(tmp_path) == [[], ["--last-failed"]]
