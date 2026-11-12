@@ -40,6 +40,7 @@ from free_claude_code.assignments.execution import (
     GitWorkspace,
     NativeCommandApproval,
     Sandbox,
+    failed_rerun_command,
     resolve_program,
     scrub_env,
 )
@@ -512,6 +513,83 @@ def assert_reviewer_is_not_author(*, author_login: str, reviewer_login: str) -> 
         raise Forbidden("author cannot review their own pull request")
 
 
+_RUN_RECORD = Path("test-results") / ".last-run.json"
+
+
+def _remove_stale_run_record(command_root: Path) -> bool:
+    """Remove a failed-test record left over from before the next check pass.
+
+    EXEC-RETRY-01 repair (Cody HOLD on PR #36): a record that already
+    exists when a pass starts cannot be told apart from one the pass
+    itself writes, so immediately before each check invocation the slate
+    is cleared and only a record that appears afterwards is trusted as
+    that pass's own. Returns True when a pre-existing record was removed;
+    the removal is recorded in the stage log by the caller.
+    """
+
+    try:
+        (command_root / _RUN_RECORD).unlink()
+    except OSError:
+        return False
+    return True
+
+
+def _tracked_run_record(
+    workspace: GitWorkspace, command_root: Path, record_relative: str
+) -> bytes | None:
+    """Bytes of a pre-existing failed-test record that is a TRACKED file.
+
+    EXEC-RETRY-01 repair 2 (Cody HOLD #2 on PR #36): a tracked record
+    is never the worker's to delete — unlinking one puts a deletion the
+    model never made into the workspace diff, where change-scope
+    validation can sweep it into the published commit. Returns the
+    record's current bytes when the file exists and git tracks it, so
+    the caller can leave it in place and decide after the pass whether
+    the pass rewrote it; None when there is no tracked record (the
+    caller then clears the slate as usual).
+    """
+
+    if not (command_root / _RUN_RECORD).exists():
+        return None
+    if not workspace.is_tracked(record_relative):
+        return None
+    try:
+        return (command_root / _RUN_RECORD).read_bytes()
+    except OSError:
+        return None
+
+
+def _record_written_by_pass(command_root: Path, previous: bytes) -> bool:
+    """True when the record on disk now differs from the tracked bytes
+    captured before the pass — the pass rewrote the record, so its
+    content is this pass's own. Byte-identical content cannot be told
+    apart from the stale record and stays untrusted."""
+
+    try:
+        return (command_root / _RUN_RECORD).read_bytes() != previous
+    except OSError:
+        return False
+
+
+def _recorded_failed_tests(command_root: Path) -> tuple[str, ...]:
+    """Failed test ids the check tool recorded for the pass that just failed.
+
+    Playwright writes test-results/.last-run.json under its working
+    directory on every run; its failedTests list is exactly what
+    --last-failed would re-run. A missing or malformed record means the
+    failure was not a recorded test failure, and the caller keeps the
+    existing behavior for it.
+    """
+
+    try:
+        loaded = json.loads((command_root / _RUN_RECORD).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+    if not isinstance(loaded, dict) or not isinstance(loaded.get("failedTests"), list):
+        return ()
+    return tuple(item for item in loaded["failedTests"] if isinstance(item, str))
+
+
 def _comment_payload(body: str) -> bytes:
     lines = [
         line
@@ -655,6 +733,7 @@ class AssignmentCandidate:
         command_cwd: str,
         allowed_path_prefixes: tuple[str, ...] = ("src",),
         command_timeout_seconds: float = 10.0,
+        allow_failed_test_rerun: bool = False,
         setup_command: tuple[str, ...] | None = None,
         grants_dir: Path | None = None,
         model_proxy_base_url: str = "http://127.0.0.1:8082",
@@ -674,6 +753,12 @@ class AssignmentCandidate:
         self.command_cwd = command_cwd
         self.allowed_path_prefixes = tuple(allowed_path_prefixes)
         self.command_timeout_seconds = float(command_timeout_seconds)
+        # EXEC-RETRY-01: the failed-test re-run inside the check stage is
+        # authorized only by the explicit runtime opt-in
+        # (allow_failed_test_rerun in runtime.json, absent/off by
+        # default — Producer decision, Casey, 2026-11-11). Without it the
+        # check stage behaves exactly as it did before the feature.
+        self.allow_failed_test_rerun = bool(allow_failed_test_rerun)
         self.setup_command = tuple(setup_command) if setup_command else None
         self.grants_dir = grants_dir
         self.model_proxy_base_url = model_proxy_base_url
@@ -786,13 +871,28 @@ class AssignmentCandidate:
         logs: list[dict[str, object]] = []
         evidence = None
         command_root = self.paths.workspace / self.command_cwd
+        record_relative = (Path(self.command_cwd) / _RUN_RECORD).as_posix()
         secrets = load_secret_file(self.paths.secrets_file)
         publish_token = secrets.get("github_publish")
         child_env = model_environment(os.environ, publish_token)
         self._publish_token = publish_token
         if publish_token in child_env.values() or any(name in child_env for name in PUBLISHER_ENV):
             raise Forbidden("publisher credential reached a child environment")
-        sandbox = Sandbox(command_root, allowed=(self.allowed_command,), timeout_seconds=self.command_timeout_seconds)
+        # EXEC-RETRY-01: only when the explicit runtime opt-in authorizes
+        # the failed-test re-run does the check sandbox also admit exactly
+        # one derived argv — the configured command plus --last-failed,
+        # built by trusted code (failed_rerun_command) from the approved
+        # command. Without the opt-in the derived argv is not even
+        # admitted. Nothing else is admitted either way; vet_command still
+        # exact-matches every call.
+        check_commands = (self.allowed_command,)
+        if self.allow_failed_test_rerun:
+            check_commands = (self.allowed_command, failed_rerun_command(self.allowed_command))
+        sandbox = Sandbox(
+            command_root,
+            allowed=check_commands,
+            timeout_seconds=self.command_timeout_seconds,
+        )
         bound_setup = tuple(manifest.scope.setup_command)
         if tuple(self.setup_command or ()) != bound_setup:
             # The manifest is the approval record: its id binds the exact
@@ -890,6 +990,22 @@ class AssignmentCandidate:
                     "head_sha": workspace.head(),
                     "merged": False,
                 }
+            # EXEC-RETRY-01 repair: clear any failed-test record left over
+            # from before this pass, so a record read after the pass can
+            # only be this pass's own. If a record survives the clearing,
+            # no record from this pass is trusted either. Repair 2: a
+            # TRACKED record is never unlinked (deleting it would leak a
+            # worker-made deletion into the workspace diff) — it is left
+            # in place, and its trust is decided after the pass by
+            # whether the pass rewrote it.
+            stale_record_removed = False
+            record_trusted = False
+            tracked_record: bytes | None = None
+            if self.allow_failed_test_rerun:
+                tracked_record = _tracked_run_record(workspace, command_root, record_relative)
+                if tracked_record is None:
+                    stale_record_removed = _remove_stale_run_record(command_root)
+                    record_trusted = not (command_root / _RUN_RECORD).exists()
             try:
                 evidence = sandbox.run(
                     NativeCommandApproval(manifest.manifest_id, self.allowed_command, attestation.principal_id),
@@ -934,8 +1050,121 @@ class AssignmentCandidate:
                 }
             code = evidence.returncode if evidence.returncode is not None else 1
             logs.append({"stage": "test", "exit_code": code, "stderr": evidence.stderr_tail})
+            if stale_record_removed:
+                logs[-1]["stale_record_removed"] = True
+            if tracked_record is not None:
+                logs[-1]["tracked_record_kept"] = True
             if code == 0:
                 break
+            if tracked_record is not None:
+                # The tracked record was left in place; it counts as
+                # this pass's own only if the pass rewrote it. Untouched
+                # stale bytes keep the failure on the existing repair
+                # path below.
+                record_trusted = _record_written_by_pass(command_root, tracked_record)
+            # The re-run fires only when all three gates hold: the
+            # explicit runtime opt-in authorized it, the record read here
+            # was written by this pass (the pre-pass clearing left a clean
+            # slate, or a tracked record left in place was rewritten by
+            # the pass), and that fresh record names at least one failed
+            # test. Every other failure shape — no opt-in, a stale or
+            # untrusted record, no record — keeps the existing repair path
+            # below, exactly as before the feature.
+            failed_tests = (
+                _recorded_failed_tests(command_root)
+                if self.allow_failed_test_rerun and record_trusted
+                else ()
+            )
+            if failed_tests:
+                # EXEC-RETRY-01 (Producer flake policy, 2026-11-11): the
+                # first pass completed and failed with recorded test
+                # failures, so the failed tests get exactly one re-run
+                # inside this check stage (Playwright --last-failed). The
+                # re-run goes through the same sandbox, so the configured
+                # per-command timeout bounds it independently — the stage's
+                # worst case is two bounded invocations, and the re-run
+                # covers only the failed subset. Timeouts and start
+                # failures keep the check stage's existing stop semantics
+                # and are never re-run. A re-run pass replaces the stage
+                # result (the run proceeds exactly as a first-pass pass);
+                # a re-run failure stops the claim with no repair consumed —
+                # a model repair pass cannot fix a flake, so the repair
+                # loop below stays reserved for failures that recorded no
+                # failed tests. Both attempts land in the stage logs: the
+                # "test" entry carries the first pass and its failed-test
+                # count, the "test_rerun" entry the re-run's own result, so
+                # a flake-pass is distinguishable from a clean pass.
+                logs[-1]["failed_tests"] = len(failed_tests)
+                try:
+                    rerun_evidence = sandbox.run(
+                        NativeCommandApproval(
+                            manifest.manifest_id,
+                            failed_rerun_command(self.allowed_command),
+                            attestation.principal_id,
+                        ),
+                        manifest=manifest,
+                        head_sha=workspace.head(),
+                        env=child_env,
+                    )
+                except Forbidden:
+                    self.ledger.update(key, status="blocked", repairs=repairs)
+                    raise
+                except TimedOut as error:
+                    logs.append(
+                        {
+                            "stage": "test_rerun",
+                            "exit_code": None,
+                            "stderr": getattr(error, "stderr_tail", ""),
+                            "error": "timed_out",
+                            "failed_tests": len(failed_tests),
+                        }
+                    )
+                    self.ledger.update(key, status="stopped", repairs=repairs)
+                    return {
+                        "status": "stopped",
+                        "repair_attempts": repairs,
+                        "logs": logs,
+                        "head_sha": workspace.head(),
+                        "merged": False,
+                    }
+                except OSError:
+                    logs.append(
+                        {
+                            "stage": "test_rerun",
+                            "exit_code": None,
+                            "stderr": "",
+                            "error": "start_failed",
+                            "failed_tests": len(failed_tests),
+                        }
+                    )
+                    self.ledger.update(key, status="stopped", repairs=repairs)
+                    return {
+                        "status": "stopped",
+                        "repair_attempts": repairs,
+                        "logs": logs,
+                        "head_sha": workspace.head(),
+                        "merged": False,
+                    }
+                rerun_code = rerun_evidence.returncode if rerun_evidence.returncode is not None else 1
+                logs.append(
+                    {
+                        "stage": "test_rerun",
+                        "exit_code": rerun_code,
+                        "stderr": rerun_evidence.stderr_tail,
+                        "failed_tests": len(failed_tests),
+                    }
+                )
+                if rerun_code == 0:
+                    evidence = rerun_evidence
+                    break
+                self.ledger.update(key, status="stopped", repairs=repairs)
+                return {
+                    "status": "stopped",
+                    "repair_attempts": repairs,
+                    "logs": logs,
+                    "head_sha": workspace.head(),
+                    "merged": False,
+                }
             if repairs >= self.repair_limit:
                 self.ledger.update(key, status="stopped", repairs=repairs)
                 return {

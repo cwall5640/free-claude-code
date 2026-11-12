@@ -12,6 +12,7 @@ from pathlib import Path
 
 from free_claude_code.assignments.activation import is_activated
 from free_claude_code.assignments.errors import ApprovalInvalid, Conflict, Forbidden, ScopeError
+from free_claude_code.assignments.execution import is_playwright_test_command
 from free_claude_code.assignments.fcc_proxy import ensure_fcc_proxy, launcher_from_worker_file
 from free_claude_code.assignments.github_http import GitHubHttpClient
 from free_claude_code.assignments.identity import load_worker_identity
@@ -151,6 +152,17 @@ def _runtime(config: Path) -> dict[str, object]:
         or timeout > COMMAND_TIMEOUT_MAX_SECONDS
     ):
         raise Forbidden("runtime command timeout is out of bounds")
+    # EXEC-RETRY-01 (Producer decision, Casey, 2026-11-11): the failed-test
+    # re-run inside the check stage is authorized only by this explicit
+    # opt-in — absent or false by default, so every existing configuration
+    # keeps the pre-feature check behavior. The opt-in is also refused for
+    # a configured command that is not a Playwright test invocation, so a
+    # non-Playwright check can never receive --last-failed.
+    failed_rerun = raw.get("allow_failed_test_rerun", False)
+    if not isinstance(failed_rerun, bool):
+        raise Forbidden("allow_failed_test_rerun must be a boolean")
+    if failed_rerun and not is_playwright_test_command(tuple(command)):
+        raise Forbidden("allow_failed_test_rerun requires a Playwright test command")
     interval = raw.get("poll_interval_seconds", POLL_INTERVAL_SECONDS)
     limit = raw.get("poll_limit", POLL_LIMIT)
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > POLL_LIMIT:
@@ -161,6 +173,7 @@ def _runtime(config: Path) -> dict[str, object]:
         "allowed_command": tuple(command),
         "setup_command": tuple(setup_command) if setup_command is not None else None,
         "command_timeout_seconds": float(timeout),
+        "allow_failed_test_rerun": failed_rerun,
         "allowed_path_prefixes": allowed_path_prefixes,
         "audience": str(raw.get("audience", "")).strip(),
         "ca_file": str(raw.get("ca_file", "")).strip(),
@@ -223,6 +236,7 @@ def _candidate(state: Path, config: Path, runtime: dict[str, object]) -> Assignm
         command_cwd=str(runtime["command_cwd"]),
         allowed_path_prefixes=tuple(runtime["allowed_path_prefixes"]),
         command_timeout_seconds=float(runtime["command_timeout_seconds"]),
+        allow_failed_test_rerun=bool(runtime.get("allow_failed_test_rerun", False)),
         grants_dir=state / "grants",
         setup_command=tuple(runtime["setup_command"]) if runtime["setup_command"] else None,
         repair_limit=REPAIR_LIMIT,
