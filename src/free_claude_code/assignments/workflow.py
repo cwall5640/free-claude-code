@@ -534,6 +534,43 @@ def _remove_stale_run_record(command_root: Path) -> bool:
     return True
 
 
+def _tracked_run_record(
+    workspace: GitWorkspace, command_root: Path, record_relative: str
+) -> bytes | None:
+    """Bytes of a pre-existing failed-test record that is a TRACKED file.
+
+    EXEC-RETRY-01 repair 2 (Cody HOLD #2 on PR #36): a tracked record
+    is never the worker's to delete — unlinking one puts a deletion the
+    model never made into the workspace diff, where change-scope
+    validation can sweep it into the published commit. Returns the
+    record's current bytes when the file exists and git tracks it, so
+    the caller can leave it in place and decide after the pass whether
+    the pass rewrote it; None when there is no tracked record (the
+    caller then clears the slate as usual).
+    """
+
+    if not (command_root / _RUN_RECORD).exists():
+        return None
+    if not workspace.is_tracked(record_relative):
+        return None
+    try:
+        return (command_root / _RUN_RECORD).read_bytes()
+    except OSError:
+        return None
+
+
+def _record_written_by_pass(command_root: Path, previous: bytes) -> bool:
+    """True when the record on disk now differs from the tracked bytes
+    captured before the pass — the pass rewrote the record, so its
+    content is this pass's own. Byte-identical content cannot be told
+    apart from the stale record and stays untrusted."""
+
+    try:
+        return (command_root / _RUN_RECORD).read_bytes() != previous
+    except OSError:
+        return False
+
+
 def _recorded_failed_tests(command_root: Path) -> tuple[str, ...]:
     """Failed test ids the check tool recorded for the pass that just failed.
 
@@ -834,6 +871,7 @@ class AssignmentCandidate:
         logs: list[dict[str, object]] = []
         evidence = None
         command_root = self.paths.workspace / self.command_cwd
+        record_relative = (Path(self.command_cwd) / _RUN_RECORD).as_posix()
         secrets = load_secret_file(self.paths.secrets_file)
         publish_token = secrets.get("github_publish")
         child_env = model_environment(os.environ, publish_token)
@@ -955,12 +993,19 @@ class AssignmentCandidate:
             # EXEC-RETRY-01 repair: clear any failed-test record left over
             # from before this pass, so a record read after the pass can
             # only be this pass's own. If a record survives the clearing,
-            # no record from this pass is trusted either.
+            # no record from this pass is trusted either. Repair 2: a
+            # TRACKED record is never unlinked (deleting it would leak a
+            # worker-made deletion into the workspace diff) — it is left
+            # in place, and its trust is decided after the pass by
+            # whether the pass rewrote it.
             stale_record_removed = False
             record_trusted = False
+            tracked_record: bytes | None = None
             if self.allow_failed_test_rerun:
-                stale_record_removed = _remove_stale_run_record(command_root)
-                record_trusted = not (command_root / _RUN_RECORD).exists()
+                tracked_record = _tracked_run_record(workspace, command_root, record_relative)
+                if tracked_record is None:
+                    stale_record_removed = _remove_stale_run_record(command_root)
+                    record_trusted = not (command_root / _RUN_RECORD).exists()
             try:
                 evidence = sandbox.run(
                     NativeCommandApproval(manifest.manifest_id, self.allowed_command, attestation.principal_id),
@@ -1007,12 +1052,21 @@ class AssignmentCandidate:
             logs.append({"stage": "test", "exit_code": code, "stderr": evidence.stderr_tail})
             if stale_record_removed:
                 logs[-1]["stale_record_removed"] = True
+            if tracked_record is not None:
+                logs[-1]["tracked_record_kept"] = True
             if code == 0:
                 break
+            if tracked_record is not None:
+                # The tracked record was left in place; it counts as
+                # this pass's own only if the pass rewrote it. Untouched
+                # stale bytes keep the failure on the existing repair
+                # path below.
+                record_trusted = _record_written_by_pass(command_root, tracked_record)
             # The re-run fires only when all three gates hold: the
             # explicit runtime opt-in authorized it, the record read here
             # was written by this pass (the pre-pass clearing left a clean
-            # slate), and that fresh record names at least one failed
+            # slate, or a tracked record left in place was rewritten by
+            # the pass), and that fresh record names at least one failed
             # test. Every other failure shape — no opt-in, a stale or
             # untrusted record, no record — keeps the existing repair path
             # below, exactly as before the feature.

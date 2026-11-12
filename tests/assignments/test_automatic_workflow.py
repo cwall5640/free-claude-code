@@ -2579,14 +2579,17 @@ def test_check_stale_record_cannot_trigger_a_rerun(tmp_path: Path) -> None:
     finally:
         api.stop()
         git_remote.stop()
-    # The stale record was cleared before the first pass (the stage log
-    # records the removal) and the pass wrote no record of its own, so the
-    # failure kept the pre-feature repair path: repairs were consumed and
-    # the claim stopped at the repair limit, with no re-run anywhere.
+    # The stale record is a tracked file, so it was left in place (the
+    # stage log records it as kept, not removed) and the pass wrote no
+    # record of its own — the bytes after the pass are still the stale
+    # ones, hence untrusted — so the failure kept the pre-feature repair
+    # path: repairs were consumed and the claim stopped at the repair
+    # limit, with no re-run anywhere.
     assert result["status"] == "stopped"
     assert result["repair_attempts"] == 2
     assert [entry["stage"] for entry in result["logs"]] == ["test", "test", "test"]
-    assert result["logs"][0]["stale_record_removed"] is True
+    assert result["logs"][0]["tracked_record_kept"] is True
+    assert "stale_record_removed" not in result["logs"][0]
     assert _invocations(tmp_path) == [[], [], []]
     assert claim is not None and claim["status"] == "stopped"
     assert claim.get("repairs", 0) == 2
@@ -2663,3 +2666,85 @@ def test_check_non_playwright_command_never_receives_last_failed(tmp_path: Path)
     assert result["repair_attempts"] == 1
     assert [entry["stage"] for entry in result["logs"]] == ["test", "test"]
     assert _invocations(tmp_path) == [[], []]
+
+
+# --- EXEC-RETRY-01 repair 2: a tracked record is never the worker's to
+# delete (Cody HOLD #2 on PR #36) ---------------------------------------
+#
+# The stale-record fixture above commits test-results/.last-run.json, so
+# the record is a TRACKED file — but that test only exercises the
+# repair-limit path, where publish never happens. The cases below pair
+# the same tracked record with a successful check (and a successful
+# re-run) and pin what reaches publish: the pre-pass clearing must not
+# turn into a worker-made deletion inside the published tree. In
+# production the game repo gitignores test-results/, so a tracked record
+# cannot occur there; this is defense-in-depth for other repos.
+
+
+def _published_tree(tmp: Path, name: str = "run") -> dict[str, str]:
+    """path -> content for every file in the workspace HEAD tree."""
+    workspace = tmp / name / "workspace"
+    names = _git(workspace, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    return {entry: _git(workspace, "show", f"HEAD:{entry}") for entry in names}
+
+
+def test_check_tracked_stale_record_survives_a_successful_check_and_publish(
+    tmp_path: Path,
+) -> None:
+    sha = _origin_with_stale_run_record(tmp_path)
+    api = FixtureApi(sha)
+    git_remote = GitHttps(tmp_path / "git-remote", PUBLISH)
+    try:
+        candidate = _candidate(
+            tmp_path, api, sha, _passing_check_script(tmp_path), publish=git_remote
+        )
+        candidate.allow_failed_test_rerun = True
+        result = _run_published(candidate, git_remote)
+    finally:
+        api.stop()
+        git_remote.stop()
+    assert result["status"] == "returned_for_review"
+    assert result["repair_attempts"] == 0
+    assert [(entry["stage"], entry["exit_code"]) for entry in result["logs"]] == [("test", 0)]
+    assert _invocations(tmp_path) == [[]]
+    tree = _published_tree(tmp_path)
+    # The tracked record was not swept into the commit as a deletion: it
+    # is still in the published tree, byte-identical to the stale content
+    # the run started with (the passing check wrote no record of its
+    # own), and the edit is the change that published.
+    assert tree["src/test-results/.last-run.json"] == json.dumps(
+        {"status": "failed", "failedTests": ["stale-id-from-an-earlier-invocation"]}
+    )
+    assert tree["src/widget.py"] == "def scale(value, factor):\n    return value * factor"
+
+
+def test_check_tracked_record_rewritten_by_the_pass_retries_and_publishes(
+    tmp_path: Path,
+) -> None:
+    sha = _origin_with_stale_run_record(tmp_path)
+    api = FixtureApi(sha)
+    git_remote = GitHttps(tmp_path / "git-remote", PUBLISH)
+    try:
+        candidate = _candidate(
+            tmp_path, api, sha, _playwright_script(tmp_path, rerun_mode="pass"), publish=git_remote
+        )
+        candidate.allow_failed_test_rerun = True
+        result = _run_published(candidate, git_remote)
+    finally:
+        api.stop()
+        git_remote.stop()
+    assert result["status"] == "returned_for_review"
+    assert result["repair_attempts"] == 0
+    assert [(entry["stage"], entry["exit_code"]) for entry in result["logs"]] == [
+        ("test", 1),
+        ("test_rerun", 0),
+    ]
+    assert _invocations(tmp_path) == [[], ["--last-failed"]]
+    tree = _published_tree(tmp_path)
+    # The pass replaced the tracked record's stale bytes with its own
+    # fresh record; that changed content is what makes the record this
+    # pass's own, the re-run fired on it, and the file is still present
+    # in the published tree — never deleted by the worker.
+    assert tree["src/test-results/.last-run.json"] == json.dumps(
+        {"status": "failed", "failedTests": [_FLAKE_ID]}
+    )

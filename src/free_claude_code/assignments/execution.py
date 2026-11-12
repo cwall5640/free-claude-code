@@ -358,6 +358,21 @@ class GitWorkspace:
             raise Forbidden("checked out branch is missing or protected")
         return name
 
+    def is_tracked(self, relative: str) -> bool:
+        """True when git tracks the path (it is in the index or HEAD).
+
+        EXEC-RETRY-01 repair 2 (Cody HOLD #2 on PR #36): the check
+        stage's stale-record clearing must be able to tell a disposable
+        leftover from a tracked file — unlinking a tracked file would
+        put a deletion the model never made into the workspace diff.
+        """
+
+        safe = path_ok(relative)
+        output = self._run(
+            ("ls-files", "--error-unmatch", "--", safe), cwd=self.path, check=False
+        )
+        return safe in output.splitlines()
+
     def changed_paths(self) -> tuple[str, ...]:
         text = self._run(("status", "--porcelain"), cwd=self.path)
         found: list[str] = []
