@@ -193,13 +193,45 @@ def failed_rerun_command(argv: Sequence[str]) -> tuple[str, ...]:
     command — never from issue text — so a sandbox that admits the result
     admits exactly one extra argv: the configured command with this one
     fixed flag appended. Any other variation still fails vet_command's
-    exact match.
+    exact match. The derivation is only ever applied under the explicit
+    runtime opt-in (see is_playwright_test_command and _runtime): without
+    that authorization the derived argv is neither admitted nor run.
     """
 
     frozen = tuple(argv)
     if not frozen:
         raise Forbidden("empty command")
     return (*frozen, LAST_FAILED_FLAG)
+
+
+_NPX_RUNNERS = frozenset({"npx", "npx.cmd", "npx.exe", "npx.bat"})
+_PLAYWRIGHT_BINARIES = frozenset({"playwright", "playwright.cmd", "playwright.exe", "playwright.bat"})
+
+
+def is_playwright_test_command(argv: Sequence[str]) -> bool:
+    """Whether a configured check command is a Playwright test invocation.
+
+    The shapes are the ones production configures: an npx runner invoking
+    `playwright test` (npx.cmd playwright test --reporter=list
+    --workers=1), or a Playwright binary invoked with `test` directly.
+    EXEC-RETRY-01 repair (Cody HOLD on PR #36; Producer decision, Casey,
+    2026-11-11): the failed-test re-run is authorized by an explicit
+    runtime opt-in, and this shape check is the second belt — _runtime
+    refuses the opt-in for any configured command that is not a Playwright
+    test invocation, so a non-Playwright check can never receive
+    --last-failed.
+    """
+
+    frozen = tuple(argv)
+    if len(frozen) >= 3:
+        head = Path(frozen[0]).name.lower()
+        if head in _NPX_RUNNERS and frozen[1] == "playwright" and frozen[2] == "test":
+            return True
+    if len(frozen) >= 2:
+        head = Path(frozen[0]).name.lower()
+        if head in _PLAYWRIGHT_BINARIES and frozen[1] == "test":
+            return True
+    return False
 
 
 def scrub_env(source: Mapping[str, str]) -> dict[str, str]:

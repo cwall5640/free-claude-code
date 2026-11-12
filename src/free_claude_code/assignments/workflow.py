@@ -513,6 +513,27 @@ def assert_reviewer_is_not_author(*, author_login: str, reviewer_login: str) -> 
         raise Forbidden("author cannot review their own pull request")
 
 
+_RUN_RECORD = Path("test-results") / ".last-run.json"
+
+
+def _remove_stale_run_record(command_root: Path) -> bool:
+    """Remove a failed-test record left over from before the next check pass.
+
+    EXEC-RETRY-01 repair (Cody HOLD on PR #36): a record that already
+    exists when a pass starts cannot be told apart from one the pass
+    itself writes, so immediately before each check invocation the slate
+    is cleared and only a record that appears afterwards is trusted as
+    that pass's own. Returns True when a pre-existing record was removed;
+    the removal is recorded in the stage log by the caller.
+    """
+
+    try:
+        (command_root / _RUN_RECORD).unlink()
+    except OSError:
+        return False
+    return True
+
+
 def _recorded_failed_tests(command_root: Path) -> tuple[str, ...]:
     """Failed test ids the check tool recorded for the pass that just failed.
 
@@ -524,9 +545,7 @@ def _recorded_failed_tests(command_root: Path) -> tuple[str, ...]:
     """
 
     try:
-        loaded = json.loads(
-            (command_root / "test-results" / ".last-run.json").read_text(encoding="utf-8")
-        )
+        loaded = json.loads((command_root / _RUN_RECORD).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return ()
     if not isinstance(loaded, dict) or not isinstance(loaded.get("failedTests"), list):
@@ -677,6 +696,7 @@ class AssignmentCandidate:
         command_cwd: str,
         allowed_path_prefixes: tuple[str, ...] = ("src",),
         command_timeout_seconds: float = 10.0,
+        allow_failed_test_rerun: bool = False,
         setup_command: tuple[str, ...] | None = None,
         grants_dir: Path | None = None,
         model_proxy_base_url: str = "http://127.0.0.1:8082",
@@ -696,6 +716,12 @@ class AssignmentCandidate:
         self.command_cwd = command_cwd
         self.allowed_path_prefixes = tuple(allowed_path_prefixes)
         self.command_timeout_seconds = float(command_timeout_seconds)
+        # EXEC-RETRY-01: the failed-test re-run inside the check stage is
+        # authorized only by the explicit runtime opt-in
+        # (allow_failed_test_rerun in runtime.json, absent/off by
+        # default — Producer decision, Casey, 2026-11-11). Without it the
+        # check stage behaves exactly as it did before the feature.
+        self.allow_failed_test_rerun = bool(allow_failed_test_rerun)
         self.setup_command = tuple(setup_command) if setup_command else None
         self.grants_dir = grants_dir
         self.model_proxy_base_url = model_proxy_base_url
@@ -814,13 +840,19 @@ class AssignmentCandidate:
         self._publish_token = publish_token
         if publish_token in child_env.values() or any(name in child_env for name in PUBLISHER_ENV):
             raise Forbidden("publisher credential reached a child environment")
-        # EXEC-RETRY-01: the check sandbox also admits exactly one derived
-        # argv — the configured command plus --last-failed, built by trusted
-        # code (failed_rerun_command) from the approved command. Nothing
-        # else is admitted; vet_command still exact-matches every call.
+        # EXEC-RETRY-01: only when the explicit runtime opt-in authorizes
+        # the failed-test re-run does the check sandbox also admit exactly
+        # one derived argv — the configured command plus --last-failed,
+        # built by trusted code (failed_rerun_command) from the approved
+        # command. Without the opt-in the derived argv is not even
+        # admitted. Nothing else is admitted either way; vet_command still
+        # exact-matches every call.
+        check_commands = (self.allowed_command,)
+        if self.allow_failed_test_rerun:
+            check_commands = (self.allowed_command, failed_rerun_command(self.allowed_command))
         sandbox = Sandbox(
             command_root,
-            allowed=(self.allowed_command, failed_rerun_command(self.allowed_command)),
+            allowed=check_commands,
             timeout_seconds=self.command_timeout_seconds,
         )
         bound_setup = tuple(manifest.scope.setup_command)
@@ -920,6 +952,15 @@ class AssignmentCandidate:
                     "head_sha": workspace.head(),
                     "merged": False,
                 }
+            # EXEC-RETRY-01 repair: clear any failed-test record left over
+            # from before this pass, so a record read after the pass can
+            # only be this pass's own. If a record survives the clearing,
+            # no record from this pass is trusted either.
+            stale_record_removed = False
+            record_trusted = False
+            if self.allow_failed_test_rerun:
+                stale_record_removed = _remove_stale_run_record(command_root)
+                record_trusted = not (command_root / _RUN_RECORD).exists()
             try:
                 evidence = sandbox.run(
                     NativeCommandApproval(manifest.manifest_id, self.allowed_command, attestation.principal_id),
@@ -964,9 +1005,22 @@ class AssignmentCandidate:
                 }
             code = evidence.returncode if evidence.returncode is not None else 1
             logs.append({"stage": "test", "exit_code": code, "stderr": evidence.stderr_tail})
+            if stale_record_removed:
+                logs[-1]["stale_record_removed"] = True
             if code == 0:
                 break
-            failed_tests = _recorded_failed_tests(command_root)
+            # The re-run fires only when all three gates hold: the
+            # explicit runtime opt-in authorized it, the record read here
+            # was written by this pass (the pre-pass clearing left a clean
+            # slate), and that fresh record names at least one failed
+            # test. Every other failure shape — no opt-in, a stale or
+            # untrusted record, no record — keeps the existing repair path
+            # below, exactly as before the feature.
+            failed_tests = (
+                _recorded_failed_tests(command_root)
+                if self.allow_failed_test_rerun and record_trusted
+                else ()
+            )
             if failed_tests:
                 # EXEC-RETRY-01 (Producer flake policy, 2026-11-11): the
                 # first pass completed and failed with recorded test

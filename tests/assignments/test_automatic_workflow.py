@@ -2387,6 +2387,7 @@ def test_check_rerun_of_recorded_failures_passes_and_run_proceeds(tmp_path: Path
         candidate = _candidate(
             tmp_path, api, sha, _playwright_script(tmp_path, rerun_mode="pass"), publish=git_remote
         )
+        candidate.allow_failed_test_rerun = True
         result = _run_published(candidate, git_remote)
     finally:
         api.stop()
@@ -2415,6 +2416,7 @@ def test_check_rerun_failure_stops_the_claim_with_no_repair_consumed(tmp_path: P
         candidate = _candidate(
             tmp_path, api, sha, _playwright_script(tmp_path, rerun_mode="fail")
         )
+        candidate.allow_failed_test_rerun = True
         result = candidate.run_once()
         claim = candidate.ledger.get(candidate._key(9))
     finally:
@@ -2438,6 +2440,7 @@ def test_check_first_pass_pass_never_triggers_a_rerun(tmp_path: Path) -> None:
     git_remote = GitHttps(tmp_path / "git-remote", PUBLISH)
     try:
         candidate = _candidate(tmp_path, api, sha, _passing_check_script(tmp_path), publish=git_remote)
+        candidate.allow_failed_test_rerun = True
         result = _run_published(candidate, git_remote)
     finally:
         api.stop()
@@ -2475,6 +2478,7 @@ def test_check_timeout_never_triggers_a_rerun(tmp_path: Path) -> None:
             encoding="utf-8",
         )
         candidate = _candidate(tmp_path, api, sha, slow)
+        candidate.allow_failed_test_rerun = True
         candidate.command_timeout_seconds = 1
         result = candidate.run_once()
     finally:
@@ -2495,6 +2499,7 @@ def test_check_rerun_timeout_stops_the_claim_with_no_repair_consumed(tmp_path: P
         candidate = _candidate(
             tmp_path, api, sha, _playwright_script(tmp_path, rerun_mode="sleep")
         )
+        candidate.allow_failed_test_rerun = True
         candidate.command_timeout_seconds = 1
         result = candidate.run_once()
         claim = candidate.ledger.get(candidate._key(9))
@@ -2509,3 +2514,152 @@ def test_check_rerun_timeout_stops_the_claim_with_no_repair_consumed(tmp_path: P
     assert claim is not None and claim["status"] == "stopped"
     assert claim.get("repairs", 0) == 0
     assert _invocations(tmp_path) == [[], ["--last-failed"]]
+
+
+# --- EXEC-RETRY-01 repair: authorization gates (Cody HOLD on PR #36) -----
+#
+# Producer decision (Casey, 2026-11-11, via Cody's HOLD): the re-run is
+# authorized only by the explicit runtime opt-in allow_failed_test_rerun
+# (absent/off by default), and only a failed-test record written by the
+# pass that just ran may trigger it. The tests below pin the three cases:
+# a stale record cannot trigger a re-run, a non-Playwright command never
+# receives --last-failed, and without the opt-in nothing changes at all.
+
+
+def _origin_with_stale_run_record(tmp: Path) -> str:
+    """_origin plus a failed-test record committed into the tree — a
+    leftover from an earlier invocation, so the materialized workspace
+    starts the run with the stale record already inside it."""
+    origin, _sha = _origin(tmp)
+    record = origin / "src" / "test-results"
+    record.mkdir()
+    (record / ".last-run.json").write_text(
+        json.dumps(
+            {"status": "failed", "failedTests": ["stale-id-from-an-earlier-invocation"]}
+        ),
+        encoding="utf-8",
+    )
+    _git(origin, "add", "src/test-results/.last-run.json")
+    _git(origin, "commit", "-m", "stale playwright record")
+    return _git(origin, "rev-parse", "HEAD")
+
+
+def _stale_record_check_script(tmp: Path) -> Path:
+    """A check that fails every plain invocation and writes no record of
+    its own; it would exit 0 only if it were re-run with --last-failed on
+    the strength of somebody else's record."""
+    path = tmp / "stale-record-check.py"
+    path.write_text(
+        "import json, pathlib, sys\n"
+        "argv = sys.argv[1:]\n"
+        "with pathlib.Path('invocations.jsonl').open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps(argv) + '\\n')\n"
+        "if '--last-failed' in argv:\n"
+        "    pathlib.Path('widget.py').write_text("
+        "'def scale(value, factor):\\n    return value * factor\\n', encoding='utf-8')\n"
+        "    raise SystemExit(0)\n"
+        "print('genuine failure, no record written', file=sys.stderr)\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_check_stale_record_cannot_trigger_a_rerun(tmp_path: Path) -> None:
+    sha = _origin_with_stale_run_record(tmp_path)
+    api = FixtureApi(sha)
+    git_remote = GitHttps(tmp_path / "git-remote", PUBLISH)
+    try:
+        candidate = _candidate(
+            tmp_path, api, sha, _stale_record_check_script(tmp_path), publish=git_remote
+        )
+        candidate.allow_failed_test_rerun = True
+        result = _run_published(candidate, git_remote)
+        claim = candidate.ledger.get(candidate._key(9))
+    finally:
+        api.stop()
+        git_remote.stop()
+    # The stale record was cleared before the first pass (the stage log
+    # records the removal) and the pass wrote no record of its own, so the
+    # failure kept the pre-feature repair path: repairs were consumed and
+    # the claim stopped at the repair limit, with no re-run anywhere.
+    assert result["status"] == "stopped"
+    assert result["repair_attempts"] == 2
+    assert [entry["stage"] for entry in result["logs"]] == ["test", "test", "test"]
+    assert result["logs"][0]["stale_record_removed"] is True
+    assert _invocations(tmp_path) == [[], [], []]
+    assert claim is not None and claim["status"] == "stopped"
+    assert claim.get("repairs", 0) == 2
+
+
+def test_check_rerun_stays_off_without_the_explicit_opt_in(tmp_path: Path) -> None:
+    sha = _origin_ignoring_test_results(tmp_path)
+    api = FixtureApi(sha)
+    git_remote = GitHttps(tmp_path / "git-remote", PUBLISH)
+    try:
+        candidate = _candidate(
+            tmp_path, api, sha, _playwright_script(tmp_path, rerun_mode="pass"), publish=git_remote
+        )
+        # allow_failed_test_rerun is deliberately left at its default:
+        # the re-run is opt-in, so even a fresh record from the pass that
+        # just failed changes nothing without it.
+        result = _run_published(candidate, git_remote)
+        claim = candidate.ledger.get(candidate._key(9))
+    finally:
+        api.stop()
+        git_remote.stop()
+    assert candidate.allow_failed_test_rerun is False
+    assert result["status"] == "stopped"
+    assert result["repair_attempts"] == 2
+    assert [entry["stage"] for entry in result["logs"]] == ["test", "test", "test"]
+    assert _invocations(tmp_path) == [[], [], []]
+    assert claim is not None and claim["status"] == "stopped"
+    assert claim.get("repairs", 0) == 2
+
+
+def _non_playwright_script(tmp: Path) -> Path:
+    """A plain check in the repair loop's own shape — fails its first
+    attempt, passes its second — that never writes a Playwright record,
+    with argv logging so the test can inspect every invocation."""
+    path = tmp / "plain-check.py"
+    path.write_text(
+        "import json, pathlib, sys\n"
+        "with pathlib.Path('invocations.jsonl').open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "count = pathlib.Path('attempts.txt')\n"
+        "n = int(count.read_text()) + 1 if count.exists() else 1\n"
+        "count.write_text(str(n))\n"
+        "if n < 2:\n"
+        "    raise SystemExit(1)\n"
+        "pathlib.Path('widget.py').write_text("
+        "'def scale(value, factor):\\n    return value * factor\\n', encoding='utf-8')\n"
+        "raise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_check_non_playwright_command_never_receives_last_failed(tmp_path: Path) -> None:
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    git_remote = GitHttps(tmp_path / "git-remote", PUBLISH)
+    try:
+        candidate = _candidate(
+            tmp_path, api, sha, _non_playwright_script(tmp_path), publish=git_remote
+        )
+        candidate.allow_failed_test_rerun = True
+        result = _run_published(candidate, git_remote)
+    finally:
+        api.stop()
+        git_remote.stop()
+    # Even with the opt-in on, a check that produces no Playwright record
+    # keeps the repair path — one repair, then the second attempt passes —
+    # and no invocation ever carries --last-failed. The configuration
+    # layer additionally refuses the opt-in itself for a non-Playwright
+    # configured command (test_runtime_rerun.py), so in production such a
+    # command cannot be authorized for the re-run at all.
+    assert result["status"] == "returned_for_review"
+    assert result["repair_attempts"] == 1
+    assert [entry["stage"] for entry in result["logs"]] == ["test", "test"]
+    assert _invocations(tmp_path) == [[], []]
