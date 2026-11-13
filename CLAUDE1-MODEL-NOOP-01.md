@@ -5,6 +5,16 @@
 **Tracking issue:** #26 (findings go there)
 **Gate this unblocks:** claude1 step 8 → step 9 (claude1 becomes the game project's primary developer after one completed end-to-end task)
 
+## Status / resolution — added 2026-11-13
+
+**This investigation is complete; the request below is closed, not active.** The original brief is preserved unchanged underneath as the historical record of run #10.
+
+- **Root cause:** documented on issue #26 — the model pass ended without editing because the assignment prompt was built without the task card present in the workspace.
+- **Repairs:** PR #28 (prompt-construction fix — task card planted in the workspace before launch, prompt built from the signed manifest, fails closed if the issue text changed since signing; merged and deployed) and PR #29 (live-verification evidence for the repaired path).
+- **Scope note:** failures in later claude1 runs (for example the WebKit `game.spec.js:435` check-stage stalls) are separate issues, tracked on issue #26 and the game repo's #617 / #548 — they are not a reopening of this brief.
+
+— dev:minerva, 2026-11-13
+
 ## The assignment claude1 was given
 
 CLAUDE1-TEST-02 (game repo `cwall5640/anime-story-rpg` issue #548), via signed manifest
