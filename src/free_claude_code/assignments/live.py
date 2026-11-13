@@ -30,12 +30,15 @@ from free_claude_code.assignments.workflow import (
 POLL_INTERVAL_SECONDS = 30.0
 POLL_LIMIT = 20
 COMMAND_TIMEOUT_SECONDS = 10.0
-COMMAND_TIMEOUT_MAX_SECONDS = 3600.0
+COMMAND_TIMEOUT_MAX_SECONDS = 7200.0
+# TIMEOUT-01: the cap was 3600s until run #21 (2026-11-12), whose check
+# suite ran ~81 minutes and passed after the sandbox had already timed
+# the command out — the claim stopped and the pass never published.
 # AWAKE-01: the awake budget bounds one whole run (setup + model + check +
 # publish). The check alone may run COMMAND_TIMEOUT_MAX_SECONDS, so the
 # default must sit well above that; the old candidate default of 30s was
 # never wired through here and masked every run's result summary.
-AWAKE_SECONDS_DEFAULT = 7200.0
+AWAKE_SECONDS_DEFAULT = 10800.0
 AWAKE_SECONDS_MIN = 60.0
 AWAKE_SECONDS_MAX = 14400.0
 KILL_NAME = "KILL"
