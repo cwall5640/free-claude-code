@@ -143,6 +143,7 @@ line-ending = "auto"
 skip-magic-trailing-comma = false
 
 [tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["src", "."]
 addopts = "-p e2e.thread_diagnostics -n auto --dist=worksteal"
 tmp_path_retention_policy = "failed"
