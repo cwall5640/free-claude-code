@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+from free_claude_code.assignments import machine_stats
 from free_claude_code.assignments.ed25519_verify import verify_ed25519
 from free_claude_code.assignments.handoff import actor_label, assert_handoff_label
 from free_claude_code.assignments.identity import WorkerIdentity, default_worker_identity
@@ -905,6 +906,7 @@ class AssignmentCandidate:
             setup_sandbox = Sandbox(
                 command_root, allowed=(bound_setup,), timeout_seconds=self.command_timeout_seconds
             )
+            setup_started = time.monotonic()
             try:
                 setup_evidence = setup_sandbox.run(
                     NativeCommandApproval(manifest.manifest_id, bound_setup, attestation.principal_id),
@@ -916,19 +918,43 @@ class AssignmentCandidate:
                 self.ledger.update(key, status="blocked", repairs=repairs)
                 raise
             except TimedOut:
-                logs.append({"stage": "setup", "exit_code": None, "stderr": "", "error": "timed_out"})
+                logs.append(
+                    {
+                        "stage": "setup",
+                        "exit_code": None,
+                        "stderr": "",
+                        "error": "timed_out",
+                        "duration_seconds": time.monotonic() - setup_started,
+                    }
+                )
                 self.ledger.update(key, status="stopped", repairs=repairs)
                 return {"status": "stopped", "repair_attempts": repairs, "logs": logs}
             except OSError:
-                logs.append({"stage": "setup", "exit_code": None, "stderr": "", "error": "start_failed"})
+                logs.append(
+                    {
+                        "stage": "setup",
+                        "exit_code": None,
+                        "stderr": "",
+                        "error": "start_failed",
+                        "duration_seconds": time.monotonic() - setup_started,
+                    }
+                )
                 self.ledger.update(key, status="stopped", repairs=repairs)
                 return {"status": "stopped", "repair_attempts": repairs, "logs": logs}
             setup_code = setup_evidence.returncode if setup_evidence.returncode is not None else 1
-            logs.append({"stage": "setup", "exit_code": setup_code, "stderr": setup_evidence.stderr_tail})
+            logs.append(
+                {
+                    "stage": "setup",
+                    "exit_code": setup_code,
+                    "stderr": setup_evidence.stderr_tail,
+                    "duration_seconds": time.monotonic() - setup_started,
+                }
+            )
             if setup_code != 0:
                 self.ledger.update(key, status="stopped", repairs=repairs)
                 return {"status": "stopped", "repair_attempts": repairs, "logs": logs}
         while True:
+            model_started = time.monotonic()
             try:
                 self._run_model_if_granted(manifest, child_env)
             except Forbidden:
@@ -945,6 +971,7 @@ class AssignmentCandidate:
                         "stdout": getattr(error, "stdout_tail", ""),
                         "stderr": getattr(error, "stderr_tail", ""),
                         "error": "timed_out",
+                        "duration_seconds": time.monotonic() - model_started,
                     }
                 )
                 self.ledger.update(key, status="stopped", repairs=repairs)
@@ -970,6 +997,7 @@ class AssignmentCandidate:
                         "stdout": error.stdout_tail,
                         "stderr": error.stderr_tail,
                         "error": "session_failed",
+                        "duration_seconds": time.monotonic() - model_started,
                     }
                 )
                 self.ledger.update(key, status="stopped", repairs=repairs)
@@ -981,7 +1009,15 @@ class AssignmentCandidate:
                     "merged": False,
                 }
             except OSError:
-                logs.append({"stage": "model", "exit_code": None, "stderr": "", "error": "start_failed"})
+                logs.append(
+                    {
+                        "stage": "model",
+                        "exit_code": None,
+                        "stderr": "",
+                        "error": "start_failed",
+                        "duration_seconds": time.monotonic() - model_started,
+                    }
+                )
                 self.ledger.update(key, status="stopped", repairs=repairs)
                 return {
                     "status": "stopped",
@@ -1006,6 +1042,13 @@ class AssignmentCandidate:
                 if tracked_record is None:
                     stale_record_removed = _remove_stale_run_record(command_root)
                     record_trusted = not (command_root / _RUN_RECORD).exists()
+            # STALL-DIAG-01: the check stage records its wall duration, a
+            # machine stats snapshot taken at its start, and the slowest
+            # tests from the check evidence — the split the run #21/#25
+            # comparison could not make from the old logs.
+            check_started = time.monotonic()
+            check_machine = machine_stats.snapshot()
+            evidence_before = len(sandbox.evidence)
             try:
                 evidence = sandbox.run(
                     NativeCommandApproval(manifest.manifest_id, self.allowed_command, attestation.principal_id),
@@ -1022,12 +1065,39 @@ class AssignmentCandidate:
                 # repair attempt, and the claim stops with the partial output
                 # recorded instead of escaping and stranding the claim active
                 # (FCC #20, step-8 run #4).
+                timed_out_entry: dict[str, object] = {
+                    "stage": "test",
+                    "exit_code": None,
+                    "stderr": getattr(error, "stderr_tail", ""),
+                    "error": "timed_out",
+                    "duration_seconds": time.monotonic() - check_started,
+                    "machine": check_machine,
+                }
+                if len(sandbox.evidence) > evidence_before:
+                    # The sandbox recorded this call's evidence before the
+                    # raise; its slowest-tests parse of the partial output
+                    # is the stall's best evidence.
+                    timed_out_entry["slowest_tests"] = [
+                        list(pair) for pair in sandbox.evidence[-1].slowest_tests
+                    ]
+                logs.append(timed_out_entry)
+                self.ledger.update(key, status="stopped", repairs=repairs)
+                return {
+                    "status": "stopped",
+                    "repair_attempts": repairs,
+                    "logs": logs,
+                    "head_sha": workspace.head(),
+                    "merged": False,
+                }
+            except OSError:
                 logs.append(
                     {
                         "stage": "test",
                         "exit_code": None,
-                        "stderr": getattr(error, "stderr_tail", ""),
-                        "error": "timed_out",
+                        "stderr": "",
+                        "error": "start_failed",
+                        "duration_seconds": time.monotonic() - check_started,
+                        "machine": check_machine,
                     }
                 )
                 self.ledger.update(key, status="stopped", repairs=repairs)
@@ -1038,18 +1108,17 @@ class AssignmentCandidate:
                     "head_sha": workspace.head(),
                     "merged": False,
                 }
-            except OSError:
-                logs.append({"stage": "test", "exit_code": None, "stderr": "", "error": "start_failed"})
-                self.ledger.update(key, status="stopped", repairs=repairs)
-                return {
-                    "status": "stopped",
-                    "repair_attempts": repairs,
-                    "logs": logs,
-                    "head_sha": workspace.head(),
-                    "merged": False,
-                }
             code = evidence.returncode if evidence.returncode is not None else 1
-            logs.append({"stage": "test", "exit_code": code, "stderr": evidence.stderr_tail})
+            logs.append(
+                {
+                    "stage": "test",
+                    "exit_code": code,
+                    "stderr": evidence.stderr_tail,
+                    "duration_seconds": time.monotonic() - check_started,
+                    "machine": check_machine,
+                    "slowest_tests": [list(pair) for pair in evidence.slowest_tests],
+                }
+            )
             if stale_record_removed:
                 logs[-1]["stale_record_removed"] = True
             if tracked_record is not None:
@@ -1095,6 +1164,8 @@ class AssignmentCandidate:
                 # count, the "test_rerun" entry the re-run's own result, so
                 # a flake-pass is distinguishable from a clean pass.
                 logs[-1]["failed_tests"] = len(failed_tests)
+                rerun_started = time.monotonic()
+                rerun_evidence_before = len(sandbox.evidence)
                 try:
                     rerun_evidence = sandbox.run(
                         NativeCommandApproval(
@@ -1110,15 +1181,19 @@ class AssignmentCandidate:
                     self.ledger.update(key, status="blocked", repairs=repairs)
                     raise
                 except TimedOut as error:
-                    logs.append(
-                        {
-                            "stage": "test_rerun",
-                            "exit_code": None,
-                            "stderr": getattr(error, "stderr_tail", ""),
-                            "error": "timed_out",
-                            "failed_tests": len(failed_tests),
-                        }
-                    )
+                    rerun_timed_out_entry: dict[str, object] = {
+                        "stage": "test_rerun",
+                        "exit_code": None,
+                        "stderr": getattr(error, "stderr_tail", ""),
+                        "error": "timed_out",
+                        "failed_tests": len(failed_tests),
+                        "duration_seconds": time.monotonic() - rerun_started,
+                    }
+                    if len(sandbox.evidence) > rerun_evidence_before:
+                        rerun_timed_out_entry["slowest_tests"] = [
+                            list(pair) for pair in sandbox.evidence[-1].slowest_tests
+                        ]
+                    logs.append(rerun_timed_out_entry)
                     self.ledger.update(key, status="stopped", repairs=repairs)
                     return {
                         "status": "stopped",
@@ -1135,6 +1210,7 @@ class AssignmentCandidate:
                             "stderr": "",
                             "error": "start_failed",
                             "failed_tests": len(failed_tests),
+                            "duration_seconds": time.monotonic() - rerun_started,
                         }
                     )
                     self.ledger.update(key, status="stopped", repairs=repairs)
@@ -1152,6 +1228,10 @@ class AssignmentCandidate:
                         "exit_code": rerun_code,
                         "stderr": rerun_evidence.stderr_tail,
                         "failed_tests": len(failed_tests),
+                        "duration_seconds": time.monotonic() - rerun_started,
+                        "slowest_tests": [
+                            list(pair) for pair in rerun_evidence.slowest_tests
+                        ],
                     }
                 )
                 if rerun_code == 0:

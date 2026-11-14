@@ -2158,6 +2158,43 @@ def test_setup_command_runs_before_the_check(tmp_path: Path) -> None:
     assert result["logs"][0]["exit_code"] == 0
 
 
+def test_stage_logs_carry_durations_and_check_diagnostics(tmp_path: Path) -> None:
+    """STALL-DIAG-01: every stage log entry carries duration_seconds, and
+    the check entry also carries the machine snapshot taken at check
+    start and the slowest-tests list from the check evidence (empty for
+    this non-Playwright check command)."""
+    _origin(tmp_path)
+    sha = _git(tmp_path / "origin", "rev-parse", "HEAD")
+    api = FixtureApi(sha)
+    git_remote = GitHttps(tmp_path / "git-remote", PUBLISH)
+    try:
+        candidate = _candidate(
+            tmp_path,
+            api,
+            sha,
+            _gated_script(tmp_path),
+            publish=git_remote,
+            setup_command=(sys.executable, str(_setup_marker_script(tmp_path))),
+        )
+        result = _run_published(candidate, git_remote)
+    finally:
+        api.stop()
+        git_remote.stop()
+    assert result["status"] == "returned_for_review"
+    assert [entry["stage"] for entry in result["logs"]] == ["setup", "test"]
+    for entry in result["logs"]:
+        assert isinstance(entry["duration_seconds"], float)
+        assert entry["duration_seconds"] >= 0
+    check_entry = result["logs"][-1]
+    machine = check_entry["machine"]
+    assert isinstance(machine, dict)
+    assert machine["platform"]
+    assert "cpu_count" in machine
+    assert "load_average" in machine
+    assert "memory_total_bytes" in machine
+    assert check_entry["slowest_tests"] == []
+
+
 def test_check_stops_when_setup_never_ran(tmp_path: Path) -> None:
     _origin(tmp_path)
     sha = _git(tmp_path / "origin", "rev-parse", "HEAD")

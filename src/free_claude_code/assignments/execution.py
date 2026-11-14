@@ -8,6 +8,7 @@ not copied into command environments. Merge is not implemented.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -95,6 +96,13 @@ class CommandEvidence:
     skipped: int
     flaky: int
     browser: str
+    # STALL-DIAG-01 diagnostics. Defaulted so existing constructions are
+    # unchanged: the wall span of the run (process start to the return of
+    # communicate(), so a killed command's pipe-drain wait is included),
+    # and — for Playwright test commands only — the slowest tests parsed
+    # from the list-reporter output.
+    duration_seconds: float = 0.0
+    slowest_tests: tuple[tuple[str, float], ...] = ()
 
     @property
     def local_outcome(self) -> str:
@@ -304,6 +312,56 @@ def parse_unittest(output: str) -> tuple[int, int, int, int]:
     elif ran and failed:
         passed = max(ran - failed - skipped, 0)
     return passed, failed, skipped, flaky
+
+
+_PLAYWRIGHT_DURATION_FACTORS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+# A list-reporter result line: an optional status mark (check, cross,
+# multiplication or plus-minus sign), the result index, the
+# project/location/title chain (parts separated by the U+203A angle
+# quote), and the duration in parentheses at the end of the line. One
+# real line reads: two spaces, a check mark, "1 [webkit]", the angle
+# quote, "tests/file.spec.js:435:1", the angle quote, "a title (3.1m)".
+# Requiring the angle-quote chain keeps summary lines such as
+# "  5 passed (2.1m)" out. The glyphs are written as escapes so the
+# pattern stays plain ASCII in source.
+_PLAYWRIGHT_TEST_LINE = re.compile(
+    r"^\s*(?:[\u2713\u2718\u00d7\u00b1-]\s*)?\d+\s+"
+    r"(?P<test>.+\u203a.+?)\s*"
+    r"\((?P<amount>\d+(?:\.\d+)?)(?P<unit>ms|s|m|h)\)\s*$"
+)
+
+
+def parse_playwright_slowest(
+    output: str, *, limit: int = 10
+) -> tuple[tuple[str, float], ...]:
+    """Slowest tests in Playwright list-reporter output (STALL-DIAG-01).
+
+    Returns up to `limit` (test, seconds) pairs, slowest first, with the
+    printed durations normalized to seconds (ms/s/m/h). Diagnostics only:
+    malformed lines are skipped and this never raises — unparsed output
+    is an empty tuple, not an error.
+    """
+
+    found: list[tuple[str, float]] = []
+    try:
+        lines = output.splitlines()
+    except Exception:
+        return ()
+    for line in lines:
+        try:
+            match = _PLAYWRIGHT_TEST_LINE.match(line)
+            if match is None:
+                continue
+            seconds = round(
+                float(match.group("amount"))
+                * _PLAYWRIGHT_DURATION_FACTORS[match.group("unit")],
+                3,
+            )
+            found.append((match.group("test").strip(), seconds))
+        except Exception:
+            continue
+    found.sort(key=lambda item: item[1], reverse=True)
+    return tuple(found[:limit])
 
 
 def _count_field(line: str, name: str) -> int:
@@ -533,6 +591,9 @@ class Sandbox:
         if not timed_out and not cancelled:
             returncode = process.returncode
         passed, failed, skipped, flaky = parse_unittest(stdout + "\n" + stderr)
+        slowest_tests: tuple[tuple[str, float], ...] = ()
+        if is_playwright_test_command(argv):
+            slowest_tests = parse_playwright_slowest(stdout + "\n" + stderr)
         evidence = CommandEvidence(
             argv=argv,
             cwd=str(self.root),
@@ -549,6 +610,11 @@ class Sandbox:
             skipped=skipped,
             flaky=flaky,
             browser="not_checked",
+            # Measured here, after communicate() returns, on every path —
+            # success, timeout, cancel — so the span includes the wait
+            # for a killed process's pipes to drain (STALL-DIAG-01).
+            duration_seconds=time.monotonic() - started,
+            slowest_tests=slowest_tests,
         )
         self.evidence.append(evidence)
         if timed_out:
