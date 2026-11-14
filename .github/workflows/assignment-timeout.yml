@@ -18,7 +18,7 @@ jobs:
       matrix:
         revision: [head, baseline]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ matrix.revision == 'baseline' && 'd674f084b45e7fc328ba73927907a7446b107ac6' || github.sha }}
           persist-credentials: false
