@@ -24,7 +24,7 @@ def _config(tmp_path: Path, **extra: object) -> Path:
     return tmp_path
 
 
-@pytest.mark.parametrize("timeout,expected", [(1800, 1800.0), (60, 60.0), (10, 10.0), (3600, 3600.0), (7200, 7200.0)])
+@pytest.mark.parametrize("timeout,expected", [(1800, 1800.0), (60, 60.0), (10, 10.0), (3600, 3600.0), (7200, 7200.0), (10800, 10800.0)])
 def test_runtime_timeout_reaches_candidate(tmp_path, monkeypatch, timeout, expected):
     config = _config(tmp_path, command_timeout_seconds=timeout)
     monkeypatch.setattr(live, "load_worker_identity", lambda *_: SimpleNamespace(enabled=True))
@@ -43,7 +43,7 @@ def test_runtime_timeout_default(tmp_path):
 
 @pytest.mark.parametrize(
     "timeout",
-    [None, "1800", True, False, 0, 9.9, 7201, -5,
+    [None, "1800", True, False, 0, 9.9, 10801, -5,
      float("nan"), float("inf"), float("-inf"), [1800], {}],
 )
 def test_runtime_rejects_malformed_or_out_of_bounds_timeouts(tmp_path, timeout):

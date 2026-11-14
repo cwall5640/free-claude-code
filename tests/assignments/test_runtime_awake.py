@@ -45,8 +45,8 @@ def _candidate_kwargs(tmp_path, monkeypatch, config):
 def test_awake_default_is_above_the_longest_expected_run(tmp_path):
     awake = live._runtime(_config(tmp_path))["awake_seconds"]
     assert awake == live.AWAKE_SECONDS_DEFAULT
-    # The check stage alone may run 3600s; a whole run must fit.
-    assert awake > 3600.0
+    # The check stage alone may run 10800s (TIMEOUT-02 cap); a whole run must fit.
+    assert awake > 10800.0
 
 
 def test_awake_default_reaches_candidate(tmp_path, monkeypatch):
